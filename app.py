@@ -1,855 +1,1029 @@
+"""
+小红书冷启动成功率分析报告 — Streamlit 应用
+通过本地 FastAPI 代理调用火山引擎方舟（密钥仅在后端环境变量）+ 可选 Supabase + 可选 Stripe
+"""
+
+from __future__ import annotations
+
 import json
 import os
-import re
-from typing import Any, Dict, Optional, Tuple, List
+import secrets as py_secrets
+import uuid
+from datetime import datetime, timezone
+from urllib.parse import quote
+from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
-import requests
 
+from llm_client import LlmUserError, call_llm_backend
 
-SYSTEM_PROMPT = """你是一位拥有8年小红书品牌运营经验的顶级策略顾问，曾服务过完美日记、花西子、珀莱雅等头部国货品牌，深度参与过超过200个品牌的小红书冷启动项目。你的分析风格是：数据驱动、逻辑严谨、建议落地可执行，不说废话，每一条建议都有明确的行动指引。
+# 价格带（可在此列表扩展）
+PRICE_BAND_OPTIONS: List[str] = [
+    "0–20元",
+    "20–50元",
+    "50–99元",
+    "100–199元",
+    "200–399元",
+    "400–699元",
+    "700元以上",
+]
 
-请基于用户提供的品牌信息，生成一份专业的小红书冷启动分析报告。
+MONTHLY_BUDGET_OPTIONS = [
+    "1万以内",
+    "1-3万",
+    "3-5万",
+    "5-10万",
+    "10万以上",
+]
 
-请严格按照以下JSON格式返回，只返回纯JSON，不要包含任何markdown符号或额外文字：
+XHS_BASE_OPTIONS = [
+    "无账号从零开始",
+    "有账号但无内容",
+    "已有少量笔记",
+    "已有一定内容积累",
+]
 
+# ---------------------------------------------------------------------------
+# System prompt：专业分析师 + 固定 6 大模块 + 输出格式（含摘要 JSON 便于前端展示）
+# ---------------------------------------------------------------------------
+SYSTEM_PROMPT_ANALYST = """你是一位资深「小红书品牌营销分析师」，当前只服务【从未在小红书投放过、0站内数据、新入场】的商家。你的文风：专业、数据化、结构化、有判断、有依据、有策略，完全对标高水准品牌方案。
+
+请等待用户输入：1）品类 2）月预算 3）产品核心卖点（用户还可能补充单品价格带、品牌名、目标人群、账号基础等，可作为辅助约束）。
+
+生成一份完整、深度、数据感强、篇幅约2000字以上的《小红书冷启动成功率分析报告》。报告排版清晰、章节完整、内容极度详实，不允许简略、不允许空洞。
+
+=== 输出固定6大模块（必须全部写满，不可省略）===
+一、市场赛道机会分析（必须包含：品类供需格局、平台搜索趋势、行业竞争格局、红利判断、对标头部优秀方案的赛道定位）
+二、目标人群匹配度深度分析（必须包含：核心人群画像、性别/年龄/城市/婚姻/消费力/场景偏好、高潜破圈人群、人群匹配度评分、匹配依据）
+三、产品适配性与内容可行性分析（必须包含：内容适配类型、核心卖点承接、关键词布局、合规风险评估、可量产笔记方向）
+四、小红书30天冷启动营销策略（必须包含：三阶段节奏：蓄水期→种草期→爆发期、预算分配比例、KFS种草模型、搜索卡位策略、流量路径）
+五、冷启动成功率综合判定（必须包含：成功率评级、核心成功优势、核心风险点、30天量化目标）
+六、冷启动执行标准与止损红线（必须包含：成功指标、内容底线、投放红线、止损条件）
+
+=== 强制要求 ===
+1. 全文必须≥2000字（中文），每个模块都要有完整推导，不写短句、不做简略版。
+2. 只针对【从未投放过小红书】的新商家，不涉及历史站内数据、不做账号诊断。
+3. 网页友好排版：使用 Markdown，大标题用 # / ##，小标题用 ###，有序列表、加粗重点；不要使用复杂 HTML。
+4. 若需引用“数据”，请用“行业公开口径/平台趋势推演/合理区间估计”等方式表述，避免编造不可验证的具体站内数据。
+5. 严禁输出任何与用户当前输入无关的旧参考文案/模板/案例内容；严禁提及任何参考品牌、历史资料或内部代号（包括但不限于“帅康”等）。如你在生成过程中出现这些词或相关段落，必须立即删除并重写为通用表达，只保留针对用户当前产品与信息的分析。
+6. 不要复述“你被提供过的参考资料/原文/示例”；不要引用任何既有方案原句。输出必须是面向当前用户输入产品的原创分析与可执行策略。
+
+=== 输出格式（必须严格遵守，便于程序解析）===
+先输出一段 JSON（单行或多行均可），用如下标记包裹：
+
+<<<SUMMARY_JSON>>>
+{ ... JSON ... }
+<<<END_SUMMARY_JSON>>>
+
+JSON 字段必须为：
 {
-  "score": 数字(0-100),
-  "verdict": "一句话总结冷启动潜力（15字以内）",
-  "market": {
-    "heat": "品类热度：该品类在小红书的搜索热度和内容增长趋势，100字以内",
-    "competition": "竞争格局：该价格带主要竞争者现状，强弱如何，100字以内",
-    "opportunity": "你的机会点：基于品牌卖点的差异化切入方向，100字以内"
-  },
-  "persona": {
-    "profile": "基础画像：年龄、职业、生活状态，50字以内",
-    "content": "内容偏好：她爱看的3种具体内容形式，80字以内",
-    "purchase": "购买决策路径：从看到产品到下单的完整心理过程，100字以内",
-    "tags": ["标签1", "标签2", "标签3", "标签4", "标签5"]
-  },
-  "strategy": {
-    "week1_2": "第1-2周：找什么博主、发什么内容、重点建立什么，100字以内",
-    "week3_4": "第3-4周：如何在前期基础上放量和优化，100字以内",
-    "month2": "第二个月：如何规模化收割转化，100字以内"
-  },
-  "action": "今天就能执行的第一件事，具体到可操作的动作，50字以内",
-  "score_reason": "评分说明：从市场机会、竞争难度、品牌差异化、预算匹配度四维度说明，150字以内"
+  "score": 0-100 的整数,
+  "rating_label": "成功率评级文字（如：中高 / 中等偏上 等）",
+  "highlights": "核心优点（亮点总结，200字以内，条理化）",
+  "pitfalls": "痛点与避雷点（运营避坑清单，250字以内）",
+  "strategy_brief": "冷启动策略要点总览（300字以内，覆盖蓄水/种草/爆发与预算逻辑）",
+  "execution": "执行建议（可立即落地的行动清单，200字以内）"
 }
 
-评分标准：90-100强烈推荐；75-89推荐入场；60-74谨慎推荐；45-59风险较高；0-44不建议现阶段入场
+然后在 JSON 之后输出完整 Markdown 报告正文（包含上述六大模块，标题清晰）。
+
+注意：<<<SUMMARY_JSON>>> 与 <<<END_SUMMARY_JSON>>> 标记必须原样出现；JSON 内不要包含上述标记字符串。
 """
 
 
-# 按用户要求保持“豆包 Ark 接口”。模型 ID 以控制台为准。
-MODEL_NAME = "doubao-seed-2-0-pro-260215"
-ARK_ENDPOINT = "https://ark.cn-beijing.volces.com/api/v3/responses"
+def _sanitize_no_legacy_reference(text: str) -> str:
+    """
+    轻量过滤：移除包含禁用词的段落，防止旧参考文案/品牌名意外泄露到最终结果。
+    只做纯文本处理，不引入额外 API 调用。
+    """
+    if not text:
+        return ""
+    forbidden = ["帅康"]
+    t = str(text)
+    for w in forbidden:
+        t = t.replace(w, "")
+    blocks = [b.strip() for b in t.split("\n\n")]
+    kept = []
+    for b in blocks:
+        if not b:
+            continue
+        low = b
+        hit = any(w in low for w in forbidden)
+        if hit:
+            continue
+        kept.append(b)
+    return "\n\n".join(kept).strip()
 
 
 def set_styles() -> None:
     st.set_page_config(
-        page_title="小红书冷启动潜力分析器",
-        page_icon="🧾",
+        page_title="小红书冷启动成功率分析",
+        page_icon="✦",
         layout="centered",
         initial_sidebar_state="collapsed",
     )
-
     css = """
     <style>
-      @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600&family=Noto+Serif+SC:wght@600;700&display=swap');
-
-      /* Hide Streamlit default chrome */
+      @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600&family=Noto+Serif+SC:wght@500;600;700&display=swap');
       header {visibility: hidden;}
       footer {visibility: hidden;}
       #MainMenu {visibility: hidden;}
-
       :root{
-        --bg: #FAF9F7;
-        --card: #FFFFFF;
-        --text: #111111;
-        --muted: rgba(17,17,17,.65);
-        --border: #F0EEEB;
-        --shadow: 0 2px 20px rgba(0,0,0,0.05);
-        --accent: #FF6B6B;
-        --focus: #111111;
-        --green: #4CAF50;
-        --orange: #FF9800;
-        --gray: #999999;
+        --bg: #F8F3EA;
+        --card: #F1EADF;
+        --text: #1A1A1A;
+        --muted: #8A8276;
+        --border: rgba(0,0,0,0.18);
+        --shadow: 0 10px 30px rgba(0,0,0,0.04);
+        --accent: #000000;
+        --radius: 12px;
       }
-
-      html, body, [class*="css"]  {
-        font-family: 'Noto Sans SC', system-ui, -apple-system, Segoe UI, Roboto, Arial, 'PingFang SC','Hiragino Sans GB','Microsoft YaHei', sans-serif;
+      html, body, [class*="css"] {
+        font-family: 'Noto Sans SC', system-ui, -apple-system, Segoe UI, Roboto, Arial, 'PingFang SC','Microsoft YaHei', sans-serif;
         color: var(--text);
       }
+      html, body { max-width: 100%; overflow-x: hidden; }
+      * { box-sizing: border-box; }
+      .stApp { background: var(--bg); }
+      section.main > div { max-width: 860px; padding-top: 42px; padding-bottom: 42px; }
 
-      .stApp{
-        background: var(--bg);
-      }
+      /* subtle fade-in */
+      section.main > div > div { animation: fadeIn .28s ease-out; }
+      @keyframes fadeIn { from{ opacity:0; transform: translateY(6px);} to{ opacity:1; transform: translateY(0);} }
 
-      /* Center max width */
-      section.main > div { max-width: 800px; padding-top: 28px; padding-bottom: 24px; }
-
-      .title-wrap{
-        margin: 4px 0 16px 0;
-      }
-      .title{
-        font-family: 'Noto Serif SC', serif;
-        font-weight: 700;
-        letter-spacing: .5px;
-        font-size: 34px;
-        line-height: 1.2;
-        margin: 0;
-      }
-      .subtitle{
-        margin-top: 10px;
-        font-size: 14px;
+      .herti-eyebrow{
+        font-family: 'Noto Serif SC', 'Times New Roman', serif;
+        font-size: 12px;
+        letter-spacing: .28em;
+        text-transform: uppercase;
         color: var(--muted);
-        line-height: 1.6;
+        text-align:center;
+        font-style: italic;
+        margin: 0 0 10px 0;
       }
-
+      .herti-title{
+        font-family: 'Noto Serif SC', 'Times New Roman', serif;
+        font-weight: 700;
+        letter-spacing: .18em;
+        text-transform: uppercase;
+        text-align:center;
+        font-size: 42px;
+        line-height: 1.12;
+        margin: 0 0 10px 0;
+      }
+      .herti-subtitle{
+        text-align:center;
+        color: var(--text);
+        font-size: 15px;
+        letter-spacing: .12em;
+        margin: 0 0 18px 0;
+      }
+      .herti-lead{
+        text-align:center;
+        color: var(--muted);
+        line-height: 1.9;
+        font-size: 14px;
+        margin: 0 0 18px 0;
+      }
+      .herti-meta{
+        text-align:center;
+        color: var(--muted);
+        font-size: 12px;
+        letter-spacing: .06em;
+        margin: 0 0 26px 0;
+      }
       .card{
         background: var(--card);
-        border: 1px solid var(--border);
-        border-radius: 20px;
+        border: 1px solid rgba(0,0,0,0.10);
+        border-radius: var(--radius);
         box-shadow: var(--shadow);
-        padding: 2rem;
+        padding: 18px 18px;
         margin: 14px 0;
       }
-
-      .section-title{
-        font-family: 'Noto Serif SC', serif;
-        font-weight: 700;
-        font-size: 16px;
+      .card-title{
+        font-family: 'Noto Serif SC', 'Times New Roman', serif;
+        letter-spacing: .10em;
+        text-transform: uppercase;
+        font-size: 12px;
+        color: var(--muted);
         margin: 0 0 10px 0;
-        letter-spacing: .4px;
       }
-      .section-body{
-        font-size: 14px;
-        line-height: 1.75;
-        color: rgba(17,17,17,.88);
-        white-space: pre-wrap;
-      }
+      .card-body{ color: var(--text); }
 
-      /* Inputs */
+      /* inputs */
       .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] > div {
-        border-radius: 12px !important;
+        border-radius: var(--radius) !important;
+        border: 1px solid rgba(0,0,0,0.18) !important;
+        background: rgba(255,255,255,0.55) !important;
       }
-      .stTextInput input:focus, .stTextArea textarea:focus {
-        border-color: var(--focus) !important;
-        box-shadow: 0 0 0 2px rgba(17,17,17,0.08) !important;
-      }
-      div[data-baseweb="select"] > div:focus-within{
-        border-color: var(--focus) !important;
-        box-shadow: 0 0 0 2px rgba(17,17,17,0.08) !important;
+      .stTextInput input:focus, .stTextArea textarea:focus,
+      div[data-baseweb="select"] > div:focus-within {
+        border-color: #000 !important;
+        box-shadow: 0 0 0 2px rgba(0,0,0,0.08) !important;
       }
 
-      /* Primary button */
+      /* buttons — primary black */
       div.stButton > button, button[kind="primary"]{
-        background: var(--accent) !important;
-        color: #fff !important;
-        border: 1px solid rgba(0,0,0,.0) !important;
-        border-radius: 14px !important;
+        border-radius: var(--radius) !important;
         width: 100% !important;
-        padding: 0.7rem 1rem !important;
+        height: 44px !important;
         font-weight: 600 !important;
+        border: 1px solid #000 !important;
+        transition: transform .06s ease, background .12s ease, color .12s ease, opacity .12s ease;
       }
-      div.stButton > button:hover, button[kind="primary"]:hover{
-        opacity: 0.85 !important;
+      div.stButton > button:active{ transform: scale(0.985); }
+      div.stButton > button[kind="primary"], button[kind="primary"]{
+        background: #000 !important;
+        color: #fff !important;
+      }
+      div.stButton > button[kind="primary"]:hover{ opacity: 0.92 !important; }
+      div.stButton > button:not([kind="primary"]){
+        background: transparent !important;
+        color: #000 !important;
+      }
+      div.stButton > button:not([kind="primary"]):hover{
+        background: rgba(255,255,255,0.40) !important;
       }
 
-      /* Text link button (back) */
-      .back-btn button{
+      /* tiny clear button */
+      .small-clear button{
         background: transparent !important;
-        color: rgba(17,17,17,.80) !important;
-        border: none !important;
+        color: #000 !important;
+        border: 1px solid rgba(0,0,0,0.25) !important;
+        border-radius: var(--radius) !important;
+        min-width: 2.3rem !important;
+        width: 2.3rem !important;
+        height: 2.3rem !important;
         padding: 0 !important;
+        font-size: 16px !important;
+        line-height: 1 !important;
+        opacity: .9;
+      }
+
+      .text-link button{
+        background: transparent !important;
+        border: none !important;
         width: auto !important;
-        border-radius: 0 !important;
+        height: auto !important;
+        padding: 0 !important;
+        color: var(--muted) !important;
         font-weight: 500 !important;
       }
-      .back-btn button:hover{
-        text-decoration: underline !important;
-        opacity: 0.9 !important;
-      }
+      .text-link button:hover{ color: #000 !important; text-decoration: underline !important; }
 
-      /* Header row on result page */
-      .result-header{
-        display:flex;
-        align-items: baseline;
-        gap: 12px;
-        margin: 6px 0 10px 0;
-      }
-      .brand-title{
-        font-family: 'Noto Serif SC', serif;
-        font-weight: 700;
-        font-size: 30px;
-        line-height: 1.15;
-        margin: 0;
-      }
-      .score-badge{
-        display:inline-flex;
-        align-items:center;
-        gap: 6px;
-        padding: 6px 10px;
-        border-radius: 999px;
-        border: 1px solid var(--border);
-        background: #fff;
-        color: rgba(17,17,17,.78);
-        font-size: 13px;
-        font-weight: 600;
-      }
+      .footer-note{ text-align:center; color: var(--muted); font-size: 12px; margin-top: 14px; }
+      .hr-soft{ height: 1px; background: rgba(0,0,0,0.10); margin: 18px 0; }
+      .progress-line{ text-align:center; color: var(--muted); font-size: 12px; letter-spacing: .08em; margin: 0 0 8px 0; }
 
-      /* Score card */
-      .score-card{
-        background: #fff;
-        border: 1px solid var(--border);
-        border-radius: 20px;
-        box-shadow: var(--shadow);
-        padding: 2rem;
-        margin: 0 0 14px 0;
-      }
-      .score-number{
-        font-family: 'Noto Serif SC', serif;
-        font-weight: 700;
-        font-size: 5rem;
-        line-height: 1;
-        margin: 0;
-      }
-      .score-verdict{
-        margin-top: 10px;
-        font-size: 16px;
-        font-weight: 600;
-        color: rgba(17,17,17,.90);
-      }
-      .score-reason{
-        margin-top: 12px;
-        font-size: 13.5px;
-        line-height: 1.75;
-        color: rgba(17,17,17,.72);
-      }
-
-      /* Pills */
-      .pills{
-        margin-top: 14px;
-        display:flex;
-        flex-wrap: wrap;
+      /* segmented radios => HERTI buttons */
+      div[role="radiogroup"]{
+        display: flex;
         gap: 10px;
+        flex-wrap: wrap;
+        padding: 2px 0;
       }
-      .pill{
-        display:inline-block;
-        background: var(--accent);
-        color: #fff;
-        padding: 6px 10px;
-        border-radius: 999px;
-        font-size: 12.5px;
-        font-weight: 600;
-        letter-spacing: .2px;
+      div[role="radiogroup"] > label{
+        margin: 0 !important;
       }
+      div[role="radiogroup"] > label > div{
+        border: 1px solid #000 !important;
+        border-radius: var(--radius) !important;
+        padding: 10px 14px !important;
+        background: rgba(255,255,255,0.55) !important;
+        color: #000 !important;
+        transition: transform .06s ease, background .12s ease, color .12s ease, opacity .12s ease;
+      }
+      div[role="radiogroup"] > label > div:active{ transform: scale(0.985); }
+      div[role="radiogroup"] > label[data-checked="true"] > div{
+        background: #000 !important;
+        color: #fff !important;
+      }
+      div[role="radiogroup"] svg{ display:none !important; } /* hide default radio icon */
+      div[role="radiogroup"] p{ margin: 0 !important; font-weight: 600 !important; }
 
-      /* Market items with left accent bar */
-      .market-item{
-        display:flex;
-        gap: 12px;
-        margin: 10px 0;
-      }
-      .market-bar{
-        width: 4px;
-        border-radius: 999px;
-        background: var(--accent);
-        flex: 0 0 auto;
-        margin-top: 4px;
-      }
-      .market-title{
-        font-weight: 700;
-        font-size: 13.5px;
-        margin: 0 0 4px 0;
-      }
-      .market-text{
-        margin: 0;
-        font-size: 13.5px;
-        line-height: 1.75;
-        color: rgba(17,17,17,.82);
-        white-space: pre-wrap;
-      }
-
-      /* Timeline */
-      .timeline{
-        display:flex;
-        flex-direction: column;
-        gap: 14px;
-        margin-top: 8px;
-      }
-      .timeline-item{
-        display:flex;
-        gap: 12px;
-        align-items:flex-start;
-      }
-      .timeline-dot{
-        width: 26px;
-        height: 26px;
-        border-radius: 999px;
-        background: var(--accent);
-        color:#fff;
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        font-weight: 800;
-        font-size: 13px;
-        flex: 0 0 auto;
-        margin-top: 2px;
-      }
-      .timeline-content{
-        flex: 1 1 auto;
-      }
-      .timeline-title{
-        margin: 0 0 4px 0;
-        font-weight: 700;
-        font-size: 13.5px;
-      }
-      .timeline-text{
-        margin: 0;
-        font-size: 13.5px;
-        line-height: 1.75;
-        color: rgba(17,17,17,.82);
-        white-space: pre-wrap;
-      }
-
-      /* Action card */
-      .action-card{
-        background: var(--accent);
-        color: #fff;
-        border-radius: 20px;
-        box-shadow: var(--shadow);
-        padding: 2rem;
-        margin: 14px 0 6px 0;
-        border: 1px solid rgba(255,255,255,.20);
-      }
-      .action-title{
-        font-family: 'Noto Serif SC', serif;
-        font-weight: 700;
-        font-size: 16px;
-        margin: 0 0 10px 0;
-        letter-spacing: .3px;
-      }
-      .action-text{
-        margin: 0;
-        font-size: 16px;
-        line-height: 1.7;
-        font-weight: 600;
-        white-space: pre-wrap;
-      }
-
-      .copyright{
-        margin-top: 22px;
-        padding: 10px 0 4px 0;
-        color: rgba(17,17,17,.50);
-        font-size: 12px;
-        text-align: center;
-      }
-
-      /* Mobile adapt */
       @media (max-width: 768px) {
-        section.main > div { padding-top: 18px; }
-        .title{ font-size: 26px; }
-        .brand-title{ font-size: 24px; }
-        .card{ padding: 1.25rem; border-radius: 18px; }
-        .score-card{ padding: 1.25rem; border-radius: 18px; }
-        .score-number{ font-size: 4rem; }
-        .action-card{ padding: 1.25rem; border-radius: 18px; }
+        section.main > div { padding-top: 26px; padding-bottom: 30px; padding-left: 12px; padding-right: 12px; }
+        .herti-title{ font-size: 32px; letter-spacing: .14em; }
+        .card{ padding: 16px 14px; }
+      }
+
+      @media (max-width: 480px) {
+        section.main > div { max-width: 100%; padding-left: 10px; padding-right: 10px; }
+        .herti-title{ font-size: 28px; letter-spacing: .12em; }
+        .herti-lead{ font-size: 13px; line-height: 1.85; }
+        .herti-meta{ margin-bottom: 18px; }
+        .card{ margin: 12px 0; }
+
+        /* bigger tap targets on phone */
+        div.stButton > button, button[kind="primary"]{ height: 48px !important; }
+        .small-clear button{ min-width: 2.6rem !important; width: 2.6rem !important; height: 2.6rem !important; }
+
+        /* iOS: prevent input zoom (16px+) */
+        .stTextInput input, .stTextArea textarea { font-size: 16px !important; }
+        .stTextArea textarea { line-height: 1.7 !important; }
+
+        /* Streamlit columns sometimes squeeze; force wrap */
+        div[data-testid="stHorizontalBlock"] { flex-wrap: wrap !important; gap: 10px !important; }
+        div[data-testid="column"] { width: 100% !important; flex: 1 1 100% !important; }
       }
     </style>
     """
     st.markdown(css, unsafe_allow_html=True)
 
 
-def clamp_score(value: Any) -> int:
+# ---------------------------------------------------------------------------
+# Secrets / env
+# ---------------------------------------------------------------------------
+def _secret(key: str, default: str = "") -> str:
     try:
-        n = int(round(float(value)))
+        v = st.secrets.get(key)
+        return str(v).strip() if v else default
+    except Exception:
+        return default
+
+
+def get_llm_backend_url() -> str:
+    """报告生成服务根地址，例如 http://127.0.0.1:8000（不含尾斜杠）。"""
+    v = _secret("LLM_BACKEND_URL") or _secret("BACKEND_URL")
+    if v:
+        return str(v).strip()
+    for k in ("LLM_BACKEND_URL", "BACKEND_URL"):
+        ev = os.getenv(k)
+        if ev and str(ev).strip():
+            return str(ev).strip()
+    return ""
+
+
+def get_public_app_url() -> str:
+    u = _secret("PUBLIC_APP_URL") or os.getenv("PUBLIC_APP_URL", "").strip()
+    if u:
+        return u.rstrip("/")
+    try:
+        ctx = st.context
+        if hasattr(ctx, "headers"):
+            h = ctx.headers
+            origin = (h.get("Origin") or h.get("Referer") or "").strip()
+            if origin:
+                return origin.rstrip("/")
+    except Exception:
+        pass
+    return "http://localhost:8501"
+
+
+def supabase_enabled() -> bool:
+    url = _secret("SUPABASE_URL") or os.getenv("SUPABASE_URL", "").strip()
+    key = _secret("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_ANON_KEY", "").strip()
+    return bool(url and key)
+
+
+def stripe_enabled() -> bool:
+    return bool(_secret("STRIPE_SECRET_KEY") and _secret("STRIPE_PRICE_ID"))
+
+
+def stripe_subscription_enabled() -> bool:
+    return bool(_secret("STRIPE_SECRET_KEY") and _secret("STRIPE_SUBSCRIPTION_PRICE_ID"))
+
+
+def get_supabase_client():
+    from supabase import create_client
+
+    url = _secret("SUPABASE_URL") or os.getenv("SUPABASE_URL", "").strip()
+    key = _secret("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_ANON_KEY", "").strip()
+    return create_client(url, key)
+
+
+def sb_set_session(client: Any, access_token: str, refresh_token: str) -> None:
+    try:
+        client.auth.set_session(access_token, refresh_token)
+    except Exception:
+        pass
+
+
+def parse_model_output(raw: str) -> Tuple[Optional[Dict[str, Any]], str, Optional[str]]:
+    """
+    返回 (summary_dict_or_none, report_markdown, error_message)
+    """
+    summary: Optional[Dict[str, Any]] = None
+    rest = raw
+    start_tag = "<<<SUMMARY_JSON>>>"
+    end_tag = "<<<END_SUMMARY_JSON>>>"
+    s0 = raw.find(start_tag)
+    s1 = raw.find(end_tag)
+    if s0 != -1 and s1 != -1 and s1 > s0:
+        js = raw[s0 + len(start_tag) : s1].strip()
+        rest = (raw[:s0] + raw[s1 + len(end_tag) :]).strip()
+        try:
+            summary = json.loads(js)
+        except json.JSONDecodeError:
+            return None, rest.strip(), "摘要 JSON 解析失败，请重试。"
+        if not isinstance(summary, dict):
+            return None, rest.strip(), "摘要 JSON 格式不正确，请重试。"
+
+    # 报告正文：去掉可能残留的空行
+    report_md = _sanitize_no_legacy_reference(rest.strip())
+    if summary is None:
+        return None, report_md, "模型未按约定输出摘要块（<<<SUMMARY_JSON>>>…<<<END_SUMMARY_JSON>>>），请重试。"
+    if len(report_md) < 500:
+        return summary, report_md, "报告正文过短，可能被截断，请重试或调大模型输出限制。"
+
+    # 摘要字段同样做轻量过滤，防止禁用词出现在卡片里
+    try:
+        for k, v in list((summary or {}).items()):
+            if isinstance(v, str):
+                summary[k] = _sanitize_no_legacy_reference(v)
+    except Exception:
+        pass
+
+    return summary, report_md, None
+
+
+def clamp_int_score(v: Any) -> int:
+    try:
+        n = int(round(float(v)))
     except Exception:
         return 0
     return max(0, min(100, n))
 
 
-def _extract_json_candidate(text: str) -> Optional[str]:
-    """
-    模型被要求只返回 JSON，但在极少数情况下仍可能夹带前后文本。
-    这里尽量鲁棒地提取第一个看起来像 JSON 对象的片段。
-    """
-    text = text.strip()
-    if text.startswith("{") and text.endswith("}"):
-        return text
-
-    m = re.search(r"\{[\s\S]*\}", text)
-    if not m:
-        return None
-    return m.group(0).strip()
-
-
-def _extract_json_objects(text: str) -> List[str]:
-    """
-    从任意文本中按括号栈提取所有顶层 JSON 对象（{...}）。
-    兼容模型输出“解释文字 + 多段 JSON”的情况。
-    """
-    objs: List[str] = []
-    start: Optional[int] = None
-    depth = 0
-    in_str = False
-    esc = False
-
-    for i, ch in enumerate(text):
-        if in_str:
-            if esc:
-                esc = False
-                continue
-            if ch == "\\":
-                esc = True
-                continue
-            if ch == '"':
-                in_str = False
-            continue
-
-        if ch == '"':
-            in_str = True
-            continue
-
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start is not None:
-                    objs.append(text[start : i + 1].strip())
-                    start = None
-
-    return objs
+# ---------------------------------------------------------------------------
+# Session state：表单持久化
+# ---------------------------------------------------------------------------
+FORM_DEFAULTS: Dict[str, Any] = {
+    "form_brand": "",
+    "form_category": "",
+    "form_price_band": PRICE_BAND_OPTIONS[2],
+    "form_selling": "",
+    "form_audience": "",
+    "form_xhs_base": XHS_BASE_OPTIONS[0],
+    "form_monthly_budget": MONTHLY_BUDGET_OPTIONS[1],
+}
 
 
-def _get_dict(d: Any, key: str) -> Dict[str, Any]:
-    v = d.get(key) if isinstance(d, dict) else None
-    return v if isinstance(v, dict) else {}
+def init_session() -> None:
+    for k, v in FORM_DEFAULTS.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+    if "page" not in st.session_state:
+        st.session_state.page = "home"
+    if "report_data" not in st.session_state:
+        st.session_state.report_data = None
+    if "report_markdown" not in st.session_state:
+        st.session_state.report_markdown = ""
+    if "input_snapshot" not in st.session_state:
+        st.session_state.input_snapshot = {}
+    if "report_unlocked" not in st.session_state:
+        st.session_state.report_unlocked = False
+    if "pending_pay_token" not in st.session_state:
+        st.session_state.pending_pay_token = ""
+    if "last_analysis_id" not in st.session_state:
+        st.session_state.last_analysis_id = ""
+    if "llm_busy" not in st.session_state:
+        st.session_state.llm_busy = False
 
 
-def parse_report(text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    required_top = ["score", "verdict", "market", "persona", "strategy", "action", "score_reason"]
-
-    # 先用更可靠的“括号栈”提取所有 JSON 对象，优先选择最后一个完整且字段齐全的
-    candidates = _extract_json_objects(text)
-    if not candidates:
-        # 回退到原先的简单提取（极端情况下仍可能有用）
-        c = _extract_json_candidate(text)
-        candidates = [c] if c else []
-
-    last_error: Optional[str] = None
-    for candidate in reversed([c for c in candidates if c]):
-        try:
-            data = json.loads(candidate)
-        except json.JSONDecodeError as e:
-            last_error = f"JSON 解析失败：{e}"
-            continue
-
-        if not isinstance(data, dict):
-            last_error = "JSON 顶层不是对象。"
-            continue
-
-        missing = [k for k in required_top if k not in data]
-        if missing:
-            last_error = f"JSON 缺少字段：{', '.join(missing)}"
-            continue
-
-        data["score"] = clamp_score(data.get("score"))
-        if not isinstance(data.get("verdict"), str):
-            data["verdict"] = str(data.get("verdict", "")).strip()
-        if not isinstance(data.get("action"), str):
-            data["action"] = str(data.get("action", "")).strip()
-        if not isinstance(data.get("score_reason"), str):
-            data["score_reason"] = str(data.get("score_reason", "")).strip()
-
-        market = _get_dict(data, "market")
-        persona = _get_dict(data, "persona")
-        strategy = _get_dict(data, "strategy")
-
-        for k in ("heat", "competition", "opportunity"):
-            if not isinstance(market.get(k), str):
-                market[k] = str(market.get(k, "")).strip()
-        for k in ("profile", "content", "purchase"):
-            if not isinstance(persona.get(k), str):
-                persona[k] = str(persona.get(k, "")).strip()
-        tags = persona.get("tags")
-        if not isinstance(tags, list):
-            persona["tags"] = []
+def field_row_clear(label: str, widget_key: str, clear_key: str, *, multiline: bool = False) -> Any:
+    c1, c2 = st.columns([1, 0.14], gap="small")
+    with c1:
+        if multiline:
+            val = st.text_area(label, key=widget_key, height=120)
         else:
-            persona["tags"] = [str(x).strip() for x in tags if str(x).strip()][:10]
-        for k in ("week1_2", "week3_4", "month2"):
-            if not isinstance(strategy.get(k), str):
-                strategy[k] = str(strategy.get(k, "")).strip()
-
-        data["market"] = market
-        data["persona"] = persona
-        data["strategy"] = strategy
-        return data, None
-
-    if candidates:
-        return None, last_error or "模型返回的 JSON 无法通过校验。"
-    return None, "模型返回内容中未找到可解析的 JSON。"
-
-
-def build_user_prompt(form: Dict[str, str]) -> str:
-    return (
-        "品牌信息如下：\n"
-        f"1. 品牌名称：{form['brand_name']}\n"
-        f"2. 品类：{form['category']}\n"
-        f"3. 价格带：{form['price_band']}\n"
-        f"4. 核心卖点：{form['selling_points']}\n"
-        f"5. 目标人群：{form['target_audience']}\n"
-        f"6. 当前小红书基础：{form['xhs_base']}\n"
-        f"7. 月预算范围：{form['monthly_budget']}\n"
-        "\n"
-        "请严格按 system 指令输出 JSON。\n"
-        "硬性要求：只输出一段纯 JSON（必须以 { 开头，以 } 结尾），不要输出任何解释、分析过程、标题、换行前后缀或多段 JSON。"
-    )
-
-
-def _extract_texts(obj: Any) -> list[str]:
-    texts: list[str] = []
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if k == "text" and isinstance(v, str):
-                texts.append(v)
-            else:
-                texts.extend(_extract_texts(v))
-    elif isinstance(obj, list):
-        for item in obj:
-            texts.extend(_extract_texts(item))
-    return texts
-
-
-def _get_ark_api_key() -> str:
-    # 优先从 Streamlit secrets 读取，其次环境变量
-    try:
-        v = st.secrets.get("ARK_API_KEY")
-        if v:
-            return str(v).strip()
-    except Exception:
-        pass
-
-    for k in ("ARK_API_KEY", "VOLC_ARK_API_KEY", "ARK_BEARER_TOKEN"):
-        v = os.getenv(k)
-        if v and v.strip():
-            return v.strip()
-    return ""
-
-
-def call_doubao(user_prompt: str, api_key: str) -> str:
-    # Ark Responses API：参考用户提供的 curl 规范
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": MODEL_NAME,
-        "input": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": f"{SYSTEM_PROMPT}\n\n---\n\n{user_prompt}",
-                    }
-                ],
-            }
-        ],
-    }
-
-    try:
-        r = requests.post(ARK_ENDPOINT, headers=headers, json=payload, timeout=60)
-    except requests.Timeout as e:
-        raise RuntimeError("网络超时，请稍后重试。") from e
-    except requests.RequestException as e:
-        raise RuntimeError("网络异常，请检查网络/代理设置后重试。") from e
-
-    if r.status_code >= 400:
-        # 尽量把错误 JSON 展示出来，方便用户在页面看到原因
-        try:
-            err = r.json()
-        except Exception:
-            err = r.text
-        if r.status_code in (401, 403):
-            raise RuntimeError("API Key 无效或无权限，请检查 Key 是否正确、是否已开通权限。")
-        raise RuntimeError(f"{r.status_code} - {err}")
-
-    data = r.json()
-    # 尽量从返回结构中提取模型输出文本（兼容不同字段形态）
-    texts = _extract_texts(data)
-    if not texts:
-        return json.dumps(data, ensure_ascii=False)
-    return "\n".join(t.strip() for t in texts if t.strip()).strip()
-
-def _score_color(score: int) -> str:
-    if score >= 90:
-        return "#4CAF50"
-    if score >= 75:
-        return "#FF6B6B"
-    if score >= 60:
-        return "#FF9800"
-    return "#999999"
-
-
-def _escape_html(s: str) -> str:
-    return (
-        s.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-        .replace("'", "&#39;")
-    )
-
-
-def _card(title: str, inner_html: str) -> None:
-    st.markdown(
-        f"""
-        <div class="card">
-          <div class="section-title">{_escape_html(title)}</div>
-          {inner_html}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def _bullet(label: str, text: str) -> str:
-    return f"<div class='section-body'><b>{_escape_html(label)}</b><br/>{_escape_html(text)}</div>"
-
-
-def render_form_page() -> None:
-    st.markdown(
-        """
-        <div class="title-wrap">
-          <div class="title">小红书冷启动潜力分析器</div>
-          <div class="subtitle">填写品牌信息，一键生成专业冷启动分析报告（评分 + 市场机会 + 人群画像 + 策略 + 行动建议）。</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    with st.form("xhs_form", clear_on_submit=False):
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        brand_name = st.text_input("品牌名称", placeholder="例如：XXX")
-        category = st.text_input("品类", placeholder="例如：彩妆-遮瑕膏")
-        price_band = st.selectbox(
-            "价格带",
-            ["50元以内", "50-100元", "100-300元", "300-500元", "500元以上"],
-            index=2,
-        )
-        selling_points = st.text_area("核心卖点", placeholder="要点描述：成分/功效/质地/场景/差异化等", height=120)
-        target_audience = st.text_input("目标人群", placeholder="例如：18-28岁油皮、学生/白领、成分党等")
-        xhs_base = st.selectbox(
-            "当前小红书基础",
-            ["无账号从零开始", "有账号但无内容", "已有少量笔记", "已有一定内容积累"],
-            index=0,
-        )
-        monthly_budget = st.selectbox(
-            "月预算范围",
-            ["1万以内", "1-3万", "3-5万", "5-10万", "10万以上"],
-            index=1,
-        )
+            val = st.text_input(label, key=widget_key)
+    with c2:
+        st.markdown('<div class="small-clear">', unsafe_allow_html=True)
+        if st.button("×", key=clear_key, help="清空"):
+            st.session_state[widget_key] = ""
+            st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
-        submitted = st.form_submit_button("生成冷启动分析报告", type="primary")
+    return val
 
-    if not submitted:
-        st.markdown('<div class="copyright">© 2026 小红书冷启动潜力分析器 · 仅供策略参考</div>', unsafe_allow_html=True)
-        return
 
-    required_fields = {
-        "品牌名称": brand_name.strip(),
-        "品类": category.strip(),
-        "核心卖点": selling_points.strip(),
-        "目标人群": target_audience.strip(),
+def select_row_clear(label: str, options: List[str], widget_key: str, clear_key: str, *, default_idx: int = 0) -> str:
+    c1, c2 = st.columns([1, 0.14], gap="small")
+    with c1:
+        choice = st.selectbox(label, options, key=widget_key)
+    with c2:
+        st.markdown('<div class="small-clear">', unsafe_allow_html=True)
+        if st.button("×", key=clear_key, help="恢复默认"):
+            st.session_state[widget_key] = options[default_idx]
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+    return str(choice)
+
+
+# ---------------------------------------------------------------------------
+# Supabase：云端历史存档（无登录版）
+# ---------------------------------------------------------------------------
+def save_analysis_cloud(sb: Any, snapshot: Dict[str, Any], report_md: str) -> None:
+    aid = str(uuid.uuid4())
+    row = {
+        "id": aid,
+        "user_id": None,
+        "brand_name": snapshot.get("brand_name") or "",
+        "category": snapshot.get("category") or "",
+        "price_range": snapshot.get("price_band") or "",
+        "analysis_result": report_md,
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    missing = [k for k, v in required_fields.items() if not v]
-    if missing:
-        st.error("请先补全必填项：" + "、".join(missing))
-        st.markdown('<div class="copyright">© 2026 小红书冷启动潜力分析器 · 仅供策略参考</div>', unsafe_allow_html=True)
-        return
+    try:
+        sb.table("merchant_analyses").insert(row).execute()
+        st.session_state.last_analysis_id = aid
+    except Exception as ex:
+        st.warning(f"云端保存失败（请检查 Supabase 表与表结构）：{ex}")
 
-    api_key = _get_ark_api_key()
-    if not api_key:
-        st.error("未配置豆包 API Key。请在运行环境中设置环境变量 ARK_API_KEY（或 VOLC_ARK_API_KEY），或在 Streamlit Secrets 中配置 ARK_API_KEY。")
-        st.markdown('<div class="copyright">© 2026 小红书冷启动潜力分析器 · 仅供策略参考</div>', unsafe_allow_html=True)
-        return
 
-    payload = {
-        "brand_name": brand_name.strip(),
-        "category": category.strip(),
-        "price_band": price_band,
-        "selling_points": selling_points.strip(),
-        "target_audience": target_audience.strip(),
-        "xhs_base": xhs_base,
-        "monthly_budget": monthly_budget,
+def load_history(sb: Any) -> List[Dict[str, Any]]:
+    try:
+        res = (
+            sb.table("merchant_analyses")
+            .select("id, created_at, brand_name, category, price_range")
+            .order("created_at", desc=True)
+            .limit(30)
+            .execute()
+        )
+        return list(res.data or [])
+    except Exception:
+        return []
+
+
+def fetch_analysis_by_id(sb: Any, aid: str) -> Optional[Dict[str, Any]]:
+    try:
+        res = (
+            sb.table("merchant_analyses")
+            .select("*")
+            .eq("id", aid)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Stripe：Checkout 返回后校验 session
+# ---------------------------------------------------------------------------
+def _qp_first(qp: Any, key: str) -> str:
+    v = qp.get(key)
+    if v is None:
+        return ""
+    if isinstance(v, list):
+        return str(v[0]) if v else ""
+    return str(v)
+
+
+def try_unlock_from_stripe_query(sb: Optional[Any]) -> None:
+    if not stripe_enabled() and not stripe_subscription_enabled():
+        return
+    qp = st.query_params
+    sid = _qp_first(qp, "session_id")
+    token = _qp_first(qp, "unlock")
+    if not sid or not token:
+        return
+    if token != st.session_state.get("pending_pay_token"):
+        return
+    import stripe
+
+    stripe.api_key = _secret("STRIPE_SECRET_KEY")
+    try:
+        sess = stripe.checkout.Session.retrieve(sid, expand=["subscription"])
+        paid = False
+        if getattr(sess, "mode", None) == "subscription":
+            paid = getattr(sess, "status", None) == "complete"
+        else:
+            paid = getattr(sess, "payment_status", None) == "paid"
+
+        if paid:
+            st.session_state.report_unlocked = True
+            st.session_state.pending_pay_token = ""
+            st.query_params.clear()
+            st.success("支付成功，已解锁完整报告。")
+            if st.session_state.get("report_markdown") or st.session_state.get("report_data"):
+                st.session_state.page = "result"
+            # 可选：回写云端解锁状态
+            try:
+                aid = st.session_state.get("last_analysis_id")
+                if sb is not None and aid and st.session_state.get("sb_access"):
+                    sb_set_session(sb, st.session_state.sb_access, st.session_state.sb_refresh or "")
+                    sb.table("analyses").update({"is_unlocked": True}).eq("id", aid).execute()
+            except Exception:
+                pass
+            st.rerun()
+    except Exception as ex:
+        st.error(f"支付校验失败：{ex}")
+
+
+def create_checkout_session(unlock_token: str, *, mode: str = "payment") -> str:
+    import stripe
+
+    stripe.api_key = _secret("STRIPE_SECRET_KEY")
+    if mode == "subscription":
+        price_id = _secret("STRIPE_SUBSCRIPTION_PRICE_ID")
+        checkout_mode = "subscription"
+    else:
+        price_id = _secret("STRIPE_PRICE_ID")
+        checkout_mode = "payment"
+    base = get_public_app_url()
+    success = f"{base}/?session_id={{CHECKOUT_SESSION_ID}}&unlock={quote(unlock_token, safe='')}"
+    cancel = f"{base}/"
+    session = stripe.checkout.Session.create(
+        mode=checkout_mode,
+        line_items=[{"price": price_id, "quantity": 1}],
+        success_url=success,
+        cancel_url=cancel,
+        metadata={"unlock_token": unlock_token, "checkout_mode": checkout_mode},
+    )
+    return str(session.url or "")
+
+
+# ---------------------------------------------------------------------------
+# UI：表单页
+# ---------------------------------------------------------------------------
+def build_generation_prompt(snapshot: Dict[str, str]) -> str:
+    return f"""请基于以下信息生成报告（核心约束：商家从未在小红书投放、0站内数据、新入场）。
+
+【必填】
+1. 品类：{snapshot["category"]}
+2. 月预算：{snapshot["monthly_budget"]}
+3. 产品核心卖点：{snapshot["selling_points"]}
+
+【选填 / 辅助】
+- 品牌名称：{snapshot.get("brand_name") or "（未提供）"}
+- 单品价格带：{snapshot.get("price_band") or "（未提供）"}
+- 目标人群：{snapshot.get("target_audience") or "（未提供）"}
+- 当前小红书基础：{snapshot.get("xhs_base") or "（未提供）"}
+
+请严格按 system 指令输出（先 SUMMARY_JSON 标记块，再 Markdown 六大模块正文）。"""
+
+
+def _load_history_into_state(sb: Any, row_id: str) -> None:
+    full = fetch_analysis_by_id(sb, row_id)
+    if not full:
+        return
+    st.session_state.last_analysis_id = str(full.get("id") or "")
+    snap = {
+        "brand_name": full.get("brand_name") or "",
+        "category": full.get("category") or "",
+        "price_band": full.get("price_range") or "",
     }
-
-    prompt = build_user_prompt(payload)
-    with st.spinner("正在生成报告…"):
-        try:
-            raw = call_doubao(prompt, api_key)
-        except Exception as e:
-            st.error(f"调用 API 失败：{e}")
-            st.markdown('<div class="copyright">© 2026 小红书冷启动潜力分析器 · 仅供策略参考</div>', unsafe_allow_html=True)
-            return
-
-        report, err = parse_report(raw)
-        if err:
-            st.error("JSON 解析失败，请重试。")
-            with st.expander("查看模型原始返回（用于排查）"):
-                st.code(raw)
-            st.markdown('<div class="copyright">© 2026 小红书冷启动潜力分析器 · 仅供策略参考</div>', unsafe_allow_html=True)
-            return
-
-    st.session_state.report_data = report
-    st.session_state.brand_name = payload["brand_name"]
+    st.session_state.input_snapshot.update(snap)
+    st.session_state.form_brand = snap["brand_name"]
+    st.session_state.form_category = snap["category"]
+    st.session_state.form_price_band = snap["price_band"] or FORM_DEFAULTS["form_price_band"]
+    st.session_state.report_data = None
+    st.session_state.report_markdown = str(full.get("analysis_result") or "")
+    st.session_state.report_unlocked = True
     st.session_state.page = "result"
     st.rerun()
 
 
-def render_result_page() -> None:
-    report: Dict[str, Any] = st.session_state.get("report_data") or {}
-    brand_name = st.session_state.get("brand_name") or "分析报告"
-    score = int(report.get("score", 0))
-    verdict = str(report.get("verdict", "")).strip()
-    score_reason = str(report.get("score_reason", "")).strip()
-
-    back_col, _ = st.columns([1, 6])
-    with back_col:
-        st.markdown('<div class="back-btn">', unsafe_allow_html=True)
-        if st.button("← 重新分析", key="back_to_form"):
-            st.session_state.page = "form"
-            st.session_state.report_data = None
-            st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-
+def render_home_page(sb: Optional[Any]) -> None:
+    st.markdown('<div class="herti-eyebrow">MERCHANT LAUNCH<br/>— a growth strategy map —</div>', unsafe_allow_html=True)
+    st.markdown('<div class="herti-title">商船下水</div>', unsafe_allow_html=True)
+    st.markdown('<div class="herti-subtitle">商家冷启动分析器</div>', unsafe_allow_html=True)
     st.markdown(
-        f"""
-        <div class="result-header">
-          <div class="brand-title">{_escape_html(brand_name)}</div>
-          <div class="score-badge">评分 <span style="color:{_score_color(score)};font-weight:800;">{score}</span></div>
-        </div>
-        """,
+        '<div class="herti-lead">流量藏在细节里，<br/>但你的产品里，有一套专属的增长逻辑，<br/>正等待被精准激活。</div>',
         unsafe_allow_html=True,
     )
+    st.markdown('<div class="herti-meta">20+分析维度 · 1次智能生成 · 约3分钟</div>', unsafe_allow_html=True)
 
-    left, right = st.columns([1, 1], gap="large")
+    # 只保留一个简洁输入框 + 两个核心按钮
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="card-title">SUMMARY</div>', unsafe_allow_html=True)
+    st.text_input("一句话概括你的产品（选填）", key="form_brand")
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    with left:
+    gen_busy = bool(st.session_state.get("llm_busy"))
+    if st.button("开始分析", type="primary", disabled=gen_busy, key="btn_start_home"):
+        st.session_state.page = "form"
+        st.rerun()
+
+    if st.button("查看历史分析", key="btn_go_history"):
+        st.session_state.page = "history"
+        st.rerun()
+
+    st.markdown('<div class="footer-note">请输入你的产品信息，开始分析</div>', unsafe_allow_html=True)
+
+
+def render_history_page(sb: Optional[Any]) -> None:
+    st.markdown('<div class="progress-line">HISTORY</div>', unsafe_allow_html=True)
+    st.markdown('<div class="herti-title" style="font-size:28px;letter-spacing:.12em;">HISTORY</div>', unsafe_allow_html=True)
+    st.markdown('<div class="herti-subtitle">历史分析</div>', unsafe_allow_html=True)
+
+    if st.button("返回首页", key="back_home_from_history"):
+        st.session_state.page = "home"
+        st.rerun()
+
+    if sb is None or not supabase_enabled():
+        st.info("未配置 Supabase，无法查看云端历史。")
+        return
+    hist = load_history(sb)
+    if not hist:
+        st.info("暂无历史记录。")
+        return
+
+    for row in hist:
+        snap = row.get("input_snapshot") or {}
+        label = f"{row.get('created_at', '')[:19]} · {snap.get('category', '')} · {snap.get('price_band', '')}"
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown(f'<div class="card-title">{_esc_html(label)}</div>', unsafe_allow_html=True)
         st.markdown(
-            f"""
-            <div class="score-card">
-              <div class="score-number" style="color:{_score_color(score)};">{score}</div>
-              <div class="score-verdict">{_escape_html(verdict)}</div>
-              <div class="score-reason">{_escape_html(score_reason)}</div>
-            </div>
-            """,
+            f'<div class="card-body" style="color:var(--muted);font-size:13px;line-height:1.8;">'
+            f'卖点：{_esc_html(str(snap.get("selling_points",""))[:120])}…</div>',
+            unsafe_allow_html=True,
+        )
+        if st.button("打开这份报告", key=f"open_hist_{row['id']}"):
+            _load_history_into_state(sb, row["id"])
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_form_page(sb: Optional[Any]) -> None:
+    st.markdown('<div class="progress-line">产品信息录入 01/06</div>', unsafe_allow_html=True)
+    st.progress(1 / 6)
+    st.markdown('<div class="herti-title" style="font-size:28px;letter-spacing:.12em;">PRODUCT INPUT</div>', unsafe_allow_html=True)
+    st.markdown('<div class="herti-subtitle">请填写你的产品信息</div>', unsafe_allow_html=True)
+
+    top_l, top_r = st.columns(2, gap="medium")
+    with top_l:
+        if st.button("返回首页", key="back_home_from_form"):
+            st.session_state.page = "home"
+            st.rerun()
+    with top_r:
+        if st.button("查看历史分析", key="go_history_from_form"):
+            st.session_state.page = "history"
+            st.rerun()
+
+    # 6 张输入卡片（按你要求的结构）；保持原有清空按钮与表单持久化
+    st.markdown('<div class="card"><div class="card-title">01 / BRAND</div>', unsafe_allow_html=True)
+    field_row_clear("品牌名（选填）", "form_brand", "clr_brand")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="card"><div class="card-title">02 / CATEGORY</div>', unsafe_allow_html=True)
+    field_row_clear("品类（必填）", "form_category", "clr_category")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="card"><div class="card-title">03 / PRICE BAND</div>', unsafe_allow_html=True)
+    select_row_clear("价格带（必填）", PRICE_BAND_OPTIONS, "form_price_band", "clr_price", default_idx=2)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="card"><div class="card-title">04 / AUDIENCE</div>', unsafe_allow_html=True)
+    field_row_clear("目标人群（选填）", "form_audience", "clr_audience")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="card"><div class="card-title">05 / SELLING POINTS</div>', unsafe_allow_html=True)
+    field_row_clear("核心卖点（必填）", "form_selling", "clr_selling", multiline=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="card"><div class="card-title">06 / BUDGET</div>', unsafe_allow_html=True)
+    # 保留原有功能：小红书基础仍可选择，但合并到预算卡片中保持 6 卡结构
+    select_row_clear("当前小红书基础（必填）", XHS_BASE_OPTIONS, "form_xhs_base", "clr_xhs", default_idx=0)
+    select_row_clear("营销预算（必填）", MONTHLY_BUDGET_OPTIONS, "form_monthly_budget", "clr_budget", default_idx=1)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    backend_url = get_llm_backend_url().rstrip("/")
+    internal_tok = (_secret("INTERNAL_API_TOKEN") or os.getenv("INTERNAL_API_TOKEN", "")).strip()
+    gen_busy = bool(st.session_state.get("llm_busy"))
+
+    if not backend_url:
+        st.error("未连接API：请配置 `LLM_BACKEND_URL`（例如 http://127.0.0.1:8000）。")
+
+    b1, b2 = st.columns(2, gap="medium")
+    with b1:
+        if st.button("返回首页", disabled=gen_busy, key="back_home_bottom"):
+            st.session_state.page = "home"
+            st.rerun()
+    with b2:
+        if st.button("生成分析报告", type="primary", disabled=gen_busy or not bool(backend_url), key="btn_generate"):
+            snap = {
+                "brand_name": str(st.session_state.form_brand).strip(),
+                "category": str(st.session_state.form_category).strip(),
+                "price_band": str(st.session_state.form_price_band),
+                "selling_points": str(st.session_state.form_selling).strip(),
+                "target_audience": str(st.session_state.form_audience).strip(),
+                "xhs_base": str(st.session_state.form_xhs_base),
+                "monthly_budget": str(st.session_state.form_monthly_budget),
+            }
+            miss = []
+            if not snap["category"]:
+                miss.append("品类")
+            if not snap["monthly_budget"]:
+                miss.append("营销预算")
+            if not snap["selling_points"]:
+                miss.append("核心卖点")
+            if miss:
+                st.error("请先补全必填项：" + "、".join(miss))
+            else:
+                st.session_state.input_snapshot = snap
+                st.session_state.llm_busy = True
+                st.session_state._llm_run_gen = True
+                st.rerun()
+
+    if st.session_state.pop("_llm_run_gen", False):
+        try:
+            snap = dict(st.session_state.get("input_snapshot") or {})
+            user_prompt = build_generation_prompt(snap)
+            with st.spinner("正在生成你的冷启动增长方案，约 3 分钟…"):
+                try:
+                    raw = call_llm_backend(
+                        backend_url,
+                        internal_tok,
+                        SYSTEM_PROMPT_ANALYST,
+                        user_prompt,
+                        on_retry=lambda m: st.warning(m),
+                    )
+                except LlmUserError as e:
+                    more = []
+                    if getattr(e, "error_code", ""):
+                        more.append(f"错误码：{e.error_code}")
+                    if getattr(e, "request_id", ""):
+                        more.append(f"请求ID：{e.request_id}")
+                    suffix = f"（{'，'.join(more)}）" if more else ""
+                    st.error(e.message + suffix)
+                    if getattr(e, "debug", ""):
+                        with st.expander("调试信息（可复制给管理员）", expanded=False):
+                            st.code(str(e.debug)[:4000])
+                    raw = None
+                except Exception:
+                    st.error("网络异常，请检查网络后重试")
+                    raw = None
+
+            if raw is None:
+                pass
+            else:
+                summary, report_md, err = parse_model_output(raw)
+                if err:
+                    st.error(err + " 请重试。")
+                    with st.expander("原始返回"):
+                        st.code(raw[:8000])
+                else:
+                    if summary:
+                        summary["score"] = clamp_int_score(summary.get("score"))
+
+                    st.session_state.report_data = summary or {
+                        "score": 0,
+                        "rating_label": "待评估",
+                        "highlights": "",
+                        "pitfalls": "",
+                        "strategy_brief": "",
+                        "execution": "",
+                    }
+                    st.session_state.report_markdown = report_md
+                    need_pay = stripe_enabled() or stripe_subscription_enabled()
+                    st.session_state.report_unlocked = not need_pay
+                    st.session_state.pending_pay_token = py_secrets.token_urlsafe(16) if need_pay else ""
+
+                    if sb is not None and supabase_enabled():
+                        save_analysis_cloud(sb, snap, report_md)
+
+                    st.session_state.page = "result"
+                    st.rerun()
+        finally:
+            st.session_state.llm_busy = False
+
+
+# ---------------------------------------------------------------------------
+# UI：结果页
+# ---------------------------------------------------------------------------
+def _esc_html(s: str) -> str:
+    return (
+        (s or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def render_summary_cards(summary: Dict[str, Any]) -> None:
+    score = clamp_int_score(summary.get("score"))
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown(
+            f'<div class="card"><div class="card-title">SCORE</div>'
+            f'<div style="font-family: Noto Serif SC, Times New Roman, serif; font-weight:700; font-size:34px; letter-spacing:.08em;">{score}</div>'
+            f'<div style="color:var(--muted);font-size:12px;letter-spacing:.08em;margin-top:6px;">{_esc_html(str(summary.get("rating_label", "")))}</div></div>',
+            unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            f'<div class="card"><div class="card-title">HIGHLIGHTS</div><p style="font-size:13px;line-height:1.9;color:var(--text);margin:0;">{_esc_html(str(summary.get("highlights", "")))}</p></div>',
+            unsafe_allow_html=True,
+        )
+    with c3:
+        st.markdown(
+            f'<div class="card"><div class="card-title">PITFALLS</div><p style="font-size:13px;line-height:1.9;color:var(--text);margin:0;">{_esc_html(str(summary.get("pitfalls", "")))}</p></div>',
+            unsafe_allow_html=True,
+        )
+    c4, c5 = st.columns(2)
+    with c4:
+        st.markdown(
+            f'<div class="card"><div class="card-title">CORE STRATEGY</div><p style="font-size:13px;line-height:1.9;color:var(--text);margin:0;">{_esc_html(str(summary.get("strategy_brief", "")))}</p></div>',
+            unsafe_allow_html=True,
+        )
+    with c5:
+        st.markdown(
+            f'<div class="card"><div class="card-title">TACTICS</div><p style="font-size:13px;line-height:1.9;color:var(--text);margin:0;">{_esc_html(str(summary.get("execution", "")))}</p></div>',
             unsafe_allow_html=True,
         )
 
-        persona = report.get("persona") if isinstance(report.get("persona"), dict) else {}
-        tags = persona.get("tags") if isinstance(persona.get("tags"), list) else []
-        pills = "".join([f"<span class='pill'>{_escape_html(str(t))}</span>" for t in tags if str(t).strip()])
-        persona_html = (
-            _bullet("基础画像", str(persona.get("profile", "")))
-            + "<hr style='border:none;border-top:1px solid #F0EEEB;margin:14px 0;'/>"
-            + _bullet("内容偏好", str(persona.get("content", "")))
-            + "<hr style='border:none;border-top:1px solid #F0EEEB;margin:14px 0;'/>"
-            + _bullet("购买决策路径", str(persona.get("purchase", "")))
-            + (f"<div class='pills'>{pills}</div>" if pills else "")
-        )
-        _card("核心人群画像", persona_html)
 
-    with right:
-        market = report.get("market") if isinstance(report.get("market"), dict) else {}
-        market_html = f"""
-          <div class="market-item">
-            <div class="market-bar"></div>
-            <div>
-              <div class="market-title">品类热度</div>
-              <p class="market-text">{_escape_html(str(market.get("heat","")))}</p>
-            </div>
-          </div>
-          <div class="market-item">
-            <div class="market-bar"></div>
-            <div>
-              <div class="market-title">竞争格局</div>
-              <p class="market-text">{_escape_html(str(market.get("competition","")))}</p>
-            </div>
-          </div>
-          <div class="market-item">
-            <div class="market-bar"></div>
-            <div>
-              <div class="market-title">你的机会点</div>
-              <p class="market-text">{_escape_html(str(market.get("opportunity","")))}</p>
-            </div>
-          </div>
-        """
-        _card("市场机会", market_html)
+def render_result_page(sb: Optional[Any]) -> None:
+    snap = st.session_state.get("input_snapshot") or {}
+    title = snap.get("brand_name") or snap.get("category") or "分析报告"
 
-        strategy = report.get("strategy") if isinstance(report.get("strategy"), dict) else {}
-        timeline_html = f"""
-          <div class="timeline">
-            <div class="timeline-item">
-              <div class="timeline-dot">1</div>
-              <div class="timeline-content">
-                <div class="timeline-title">第1-2周</div>
-                <p class="timeline-text">{_escape_html(str(strategy.get("week1_2","")))}</p>
-              </div>
-            </div>
-            <div class="timeline-item">
-              <div class="timeline-dot">2</div>
-              <div class="timeline-content">
-                <div class="timeline-title">第3-4周</div>
-                <p class="timeline-text">{_escape_html(str(strategy.get("week3_4","")))}</p>
-              </div>
-            </div>
-            <div class="timeline-item">
-              <div class="timeline-dot">3</div>
-              <div class="timeline-content">
-                <div class="timeline-title">第二个月</div>
-                <p class="timeline-text">{_escape_html(str(strategy.get("month2","")))}</p>
-              </div>
-            </div>
-          </div>
-        """
-        _card("冷启动策略", timeline_html)
+    top_l, top_r = st.columns(2, gap="medium")
+    with top_l:
+        if st.button("返回首页", key="back_home_from_result"):
+            st.session_state.page = "home"
+            st.rerun()
+    with top_r:
+        if st.button("重新分析", key="back_form"):
+            st.session_state.page = "form"
+            st.rerun()
 
-    action = str(report.get("action", "")).strip()
+    st.markdown('<div class="progress-line">RESULT</div>', unsafe_allow_html=True)
+    st.markdown('<div class="herti-title" style="font-size:30px;letter-spacing:.12em;">你的冷启动增长方案</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="herti-meta">{_esc_html(str(title))}</div>', unsafe_allow_html=True)
+    summary = st.session_state.report_data or {}
+    render_summary_cards(summary if isinstance(summary, dict) else {})
+
+    # 价格带建议：不改模型逻辑，只做 UI 展示
+    price_band = str(snap.get("price_band") or "").strip()
+    budget = str(snap.get("monthly_budget") or "").strip()
+    price_hint = (f"当前选择：{price_band}。" if price_band else "未选择价格带。") + (f" 预算：{budget}。" if budget else "")
     st.markdown(
-        f"""
-        <div class="action-card">
-          <div class="action-title">行动建议</div>
-          <p class="action-text">{_escape_html(action)}</p>
-        </div>
-        """,
+        f'<div class="card"><div class="card-title">PRICE BAND</div><p style="margin:0;line-height:1.9;font-size:13px;color:var(--text);">{_esc_html(price_hint)}</p></div>',
         unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="copyright">© 2026 小红书冷启动潜力分析器 · 仅供策略参考</div>', unsafe_allow_html=True)
+    st.markdown('<div class="hr-soft"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="card-title" style="text-align:center;margin-top:4px;">FULL REPORT</div>', unsafe_allow_html=True)
+
+    full_md = st.session_state.get("report_markdown") or ""
+    unlocked = bool(st.session_state.get("report_unlocked"))
+
+    if (stripe_enabled() or stripe_subscription_enabled()) and not unlocked:
+        st.info("完整版报告需付费解锁。以下为预览（前约 800 字）。")
+        preview = full_md[:800] + ("…" if len(full_md) > 800 else "")
+        st.markdown(preview)
+        c_pay, c_sub = st.columns(2)
+        with c_pay:
+            if stripe_enabled():
+                try:
+                    pay_url = create_checkout_session(st.session_state.pending_pay_token, mode="payment")
+                    if pay_url:
+                        st.link_button("按次付费 · 解锁本报告", pay_url)
+                except Exception as ex:
+                    st.error(f"创建按次支付链接失败：{ex}")
+        with c_sub:
+            if stripe_subscription_enabled():
+                try:
+                    sub_url = create_checkout_session(st.session_state.pending_pay_token, mode="subscription")
+                    if sub_url:
+                        st.link_button("订阅 · 解锁本报告", sub_url)
+                except Exception as ex:
+                    st.error(f"创建订阅链接失败：{ex}")
+    else:
+        with st.expander("展开查看完整报告", expanded=True):
+            st.markdown(full_md)
+
+    st.markdown('<div class="footer-note">© 2026 Merchant Launch · 仅供策略参考</div>', unsafe_allow_html=True)
+
+
+def _escape_md_title(s: str) -> str:
+    return s.replace("<", "&lt;").replace(">", "&gt;")
 
 
 def main() -> None:
     set_styles()
-    if "page" not in st.session_state:
-        st.session_state.page = "form"
-    if "report_data" not in st.session_state:
-        st.session_state.report_data = None
-    if "brand_name" not in st.session_state:
-        st.session_state.brand_name = ""
+    init_session()
 
-    if st.session_state.page == "result" and st.session_state.report_data:
-        render_result_page()
+    sb = None
+    if supabase_enabled():
+        try:
+            sb = get_supabase_client()
+            if st.session_state.sb_access and st.session_state.sb_refresh:
+                sb_set_session(sb, st.session_state.sb_access, st.session_state.sb_refresh)
+        except Exception as ex:
+            st.warning(f"Supabase 初始化失败：{ex}")
+            sb = None
+
+    # Stripe 支付回跳：必须在路由页面前处理，否则回到表单页时无法解锁
+    try_unlock_from_stripe_query(sb)
+
+    page = str(st.session_state.get("page") or "home")
+    if page == "result" and (st.session_state.report_markdown or st.session_state.report_data):
+        render_result_page(sb)
         return
-
-    st.session_state.page = "form"
-    render_form_page()
+    if page == "history":
+        render_history_page(sb)
+        return
+    if page == "form":
+        render_form_page(sb)
+        return
+    st.session_state.page = "home"
+    render_home_page(sb)
 
 
 if __name__ == "__main__":
     main()
-
