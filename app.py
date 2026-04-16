@@ -15,7 +15,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 
-from llm_client import LlmUserError, call_llm_backend
 
 # 价格带（可在此列表扩展）
 PRICE_BAND_OPTIONS: List[str] = [
