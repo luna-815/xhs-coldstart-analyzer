@@ -532,6 +532,36 @@ def _extract_action_items(*texts: str, limit: int = 4) -> List[str]:
     return out
 
 
+def _clean_full_report_markdown(md: str) -> str:
+    """
+    让“完整报告”更接近正文排版：
+    - 将过大的标题层级下调：## -> ###，### -> ###（保持），避免与页面主标题冲突
+    - 移除极端的标题噪声（如单独一行只有 # 号）
+    """
+    s = str(md or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = s.split("\n")
+    out: List[str] = []
+    for ln in lines:
+        t = ln.strip()
+        if t and set(t) == {"#"}:
+            continue
+        if t.startswith("#### "):
+            # 小标题保持（由 CSS 控制字号）
+            out.append(ln)
+            continue
+        if t.startswith("### "):
+            out.append(ln)
+            continue
+        if t.startswith("## "):
+            out.append("### " + t[3:])
+            continue
+        if t.startswith("# "):
+            out.append("### " + t[2:])
+            continue
+        out.append(ln)
+    return "\n".join(out).strip()
+
+
 def _make_share_long_image_component_html(title: str, body_html: str) -> str:
     """
     生成“长图”组件：
@@ -1191,6 +1221,11 @@ def render_result_page(sb: Optional[Any]) -> None:
     st.markdown(
         """
 <style>
+  /* 结果页全局楷体：避免 Markdown 被 HTML 包裹后“符号直出” */
+  div[data-testid="stMarkdownContainer"],
+  div[data-testid="stMarkdownContainer"] *{
+    font-family: KaiTi, "KaiTi_GB2312", "STKaiti", "Songti SC", "Noto Serif SC", serif !important;
+  }
   .kai-scope,
   .kai-scope * {
     font-family: KaiTi, "KaiTi_GB2312", "STKaiti", "Songti SC", "Noto Serif SC", serif !important;
@@ -1329,17 +1364,19 @@ def render_result_page(sb: Optional[Any]) -> None:
 
     st.markdown('<div class="hr-soft"></div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="card-title report-title-kai-gold" style="text-align:center;margin-top:4px;font-size:11px;letter-spacing:.08em;">冷启动全流程报告（展开查看）</div>',
+        '<div class="card-title report-title-kai-gold" style="text-align:center;margin-top:4px;font-size:11px;letter-spacing:.08em;">冷启动全流程报告</div>',
         unsafe_allow_html=True,
     )
 
     full_md = st.session_state.get("report_markdown") or ""
     unlocked = bool(st.session_state.get("report_unlocked"))
+    full_md_clean = _clean_full_report_markdown(str(full_md))
 
     if (stripe_enabled() or stripe_subscription_enabled()) and not unlocked:
         st.info("完整版报告需付费解锁。以下为预览（前约 800 字）。")
         preview = full_md[:800] + ("…" if len(full_md) > 800 else "")
-        st.markdown('<div class="kai-scope">\n' + preview + "\n</div>", unsafe_allow_html=True)
+        st.markdown("<div style='text-align:center;font-size:18px;font-weight:700;color:#7a6328;margin:6px 0 10px 0;'>冷启动全流程深度分析报告</div>", unsafe_allow_html=True)
+        st.markdown(preview)
         c_pay, c_sub = st.columns(2)
         with c_pay:
             if stripe_enabled():
@@ -1358,8 +1395,9 @@ def render_result_page(sb: Optional[Any]) -> None:
                 except Exception as ex:
                     st.error(f"创建订阅链接失败：{ex}")
     else:
-        with st.expander("展开查看完整报告", expanded=False):
-            st.markdown('<div class="kai-scope full-report-scope">\n' + full_md + "\n</div>", unsafe_allow_html=True)
+        # 默认平铺展示（不折叠）
+        st.markdown("<div style='text-align:center;font-size:18px;font-weight:700;color:#7a6328;margin:6px 0 10px 0;'>冷启动全流程深度分析报告</div>", unsafe_allow_html=True)
+        st.markdown('<div class="full-report-scope">\n' + full_md_clean + "\n</div>", unsafe_allow_html=True)
 
     # 5) 分享 / 打印功能区（最底部）
     st.markdown('<div class="hr-soft"></div>', unsafe_allow_html=True)
@@ -1384,7 +1422,7 @@ def render_result_page(sb: Optional[Any]) -> None:
     if st.session_state.get("share_mode"):
         # 生成长图：卡片内完成，用户生成后可“下载 PNG”，或 iPhone 长按保存
         poster_title = f"{title} · {int(total100)}/100"
-        # 分享长图内容：只放“总分 + 分维度 + 行动清单”，避免太长难保存
+        # 分享长图内容：必须包含从“总分”到“完整报告”的所有模块
         poster_body = f"""
 <div style="font-family: KaiTi, 'KaiTi_GB2312','STKaiti','Songti SC','Noto Serif SC',serif;">
   <div style="color:#7a6328;font-weight:800;font-size:22px;letter-spacing:.06em;">{_esc_html(str(title))}</div>
@@ -1402,6 +1440,10 @@ def render_result_page(sb: Optional[Any]) -> None:
     {''.join([f"<div>• {_esc_html(x)}</div>" for x in (items[:4] if items else [])])}
   </div>
   <div style="margin-top:12px;color:#777;font-size:11px;">由冷启动分析器生成 · 可截图保存</div>
+  <div style="margin-top:14px;border-top:1px solid rgba(0,0,0,0.10);padding-top:10px;">
+    <div style="color:#7a6328;font-weight:800;font-size:16px;text-align:center;letter-spacing:.06em;">冷启动全流程深度分析报告</div>
+    <pre style="white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.7;margin:10px 0 0 0;color:#111;">{_esc_html(full_md_clean)}</pre>
+  </div>
 </div>
 """
         st.markdown('<div class="card kai-scope"><div class="card-title report-title-kai-gold">分享长图</div></div>', unsafe_allow_html=True)
