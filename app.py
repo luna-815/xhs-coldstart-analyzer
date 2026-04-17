@@ -511,6 +511,93 @@ def _make_printable_html(snapshot: Dict[str, Any], summary: Dict[str, Any], repo
     return f"<!doctype html><html><head><meta charset='utf-8'>{css}</head><body>{head}{badge}<div class='hr'></div><pre>{safe_md}</pre></body></html>"
 
 
+def _extract_action_items(*texts: str, limit: int = 4) -> List[str]:
+    """
+    从 summary 的短文本中提炼 3-4 条可落地行动（启发式）。
+    """
+    raw = "；".join([str(t or "").strip() for t in texts if str(t or "").strip()])
+    if not raw:
+        return []
+    raw = raw.replace("\n", "；").replace("。", "；").replace("、", "；").replace("|", "；")
+    parts = [p.strip(" -•·\t") for p in raw.split("；")]
+    out: List[str] = []
+    for p in parts:
+        if not p or len(p) < 6:
+            continue
+        if p in out:
+            continue
+        out.append(p[:60])
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _make_share_long_image_component_html(title: str, body_html: str) -> str:
+    """
+    生成“长图”组件：
+    - 用 html2canvas 把指定容器渲染为 PNG
+    - 在组件内展示预览，并提供下载按钮（部分 iOS 会改为“打开图片后长按保存”）
+    """
+    safe_title = (title or "分享结果").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return f"""
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+    <style>
+      body {{ margin: 0; padding: 0; font-family: KaiTi, "KaiTi_GB2312", "STKaiti", "Songti SC", "Noto Serif SC", serif; }}
+      .wrap {{ padding: 10px; }}
+      .cap {{ color:#6b5b2a; font-size: 13px; margin: 6px 0 10px; }}
+      .btn {{ display:inline-block; border:1px solid rgba(0,0,0,.25); border-radius:10px; padding:10px 12px; text-decoration:none; color:#111; background:#fff; }}
+      .btn:active {{ transform: scale(.99); }}
+      #stage {{ background:#fbf6ed; border:1px solid rgba(0,0,0,.10); border-radius:14px; padding:14px; }}
+      #outImg {{ width: 100%; display:none; border-radius:14px; border:1px solid rgba(0,0,0,.10); }}
+      .row {{ display:flex; gap:10px; flex-wrap:wrap; margin: 8px 0 10px; }}
+      .hint {{ color:#666; font-size: 12px; margin-top: 8px; line-height: 1.5; }}
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="cap">{safe_title}</div>
+      <div class="row">
+        <a class="btn" href="javascript:void(0)" id="btnGen">生成长图</a>
+        <a class="btn" href="javascript:void(0)" id="btnDl" download="xhs_result.png" style="display:none;">下载长图PNG</a>
+      </div>
+      <div id="stage">{body_html}</div>
+      <img id="outImg" alt="长图预览" />
+      <div class="hint">提示：生成后会出现长图预览；iPhone 若无法直接下载，请点开图片后长按保存/或使用浏览器分享保存图片。</div>
+    </div>
+    <script>
+      const btnGen = document.getElementById('btnGen');
+      const btnDl = document.getElementById('btnDl');
+      const stage = document.getElementById('stage');
+      const outImg = document.getElementById('outImg');
+      btnGen.onclick = async () => {{
+        btnGen.textContent = '生成中...';
+        btnGen.style.opacity = '0.7';
+        try {{
+          const canvas = await html2canvas(stage, {{ scale: 2, useCORS: true, backgroundColor: '#fbf6ed' }});
+          const dataUrl = canvas.toDataURL('image/png');
+          outImg.src = dataUrl;
+          outImg.style.display = 'block';
+          btnDl.href = dataUrl;
+          btnDl.style.display = 'inline-block';
+        }} catch (e) {{
+          console.error(e);
+          alert('生成失败，请重试或使用“下载结果HTML”打印为PDF。');
+        }} finally {{
+          btnGen.textContent = '重新生成长图';
+          btnGen.style.opacity = '1';
+        }}
+      }};
+    </script>
+  </body>
+</html>
+"""
+
+
 def _normalize_dimension_scores(summary: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """
     返回四维度打分字典：
@@ -880,8 +967,27 @@ def render_history_page(sb: Optional[Any]) -> None:
 
 
 def render_form_page(sb: Optional[Any]) -> None:
-    st.markdown('<div class="progress-line">产品信息录入 01/06</div>', unsafe_allow_html=True)
-    st.progress(1 / 6)
+    # 动态进度：随填写变化（6 张卡片）
+    brand_ok = bool(str(st.session_state.get("form_brand") or "").strip())
+    category_ok = bool(str(st.session_state.get("form_category") or "").strip())
+    price_ok = bool(str(st.session_state.get("form_price_band") or "").strip())
+    audience_ok = bool(str(st.session_state.get("form_audience") or "").strip())
+    selling_ok = bool(str(st.session_state.get("form_selling") or "").strip())
+    xhs_ok = bool(str(st.session_state.get("form_xhs_base") or "").strip())
+    budget_ok = bool(str(st.session_state.get("form_monthly_budget") or "").strip())
+
+    # 6 卡对应：BRAND、CATEGORY、PRICE BAND、AUDIENCE、SELLING POINTS、BUDGET(含xhs_base+budget)
+    done = 0
+    done += 1 if brand_ok else 0
+    done += 1 if category_ok else 0
+    done += 1 if price_ok else 0
+    done += 1 if audience_ok else 0
+    done += 1 if selling_ok else 0
+    done += 1 if (xhs_ok and budget_ok) else 0
+    done = max(0, min(6, int(done)))
+
+    st.markdown(f'<div class="progress-line">产品信息录入 {done:02d}/06</div>', unsafe_allow_html=True)
+    st.progress(done / 6)
     st.markdown('<div class="herti-title" style="font-size:28px;letter-spacing:.12em;">PRODUCT INPUT</div>', unsafe_allow_html=True)
     st.markdown('<div class="herti-subtitle">请填写你的产品信息</div>', unsafe_allow_html=True)
 
@@ -1104,6 +1210,11 @@ def render_result_page(sb: Optional[Any]) -> None:
   .kai-scope div[data-testid="stMarkdownContainer"] h2 { font-size: 1.16rem !important; line-height: 1.55 !important; font-weight: 700 !important; }
   .kai-scope div[data-testid="stMarkdownContainer"] h3 { font-size: 1.10rem !important; line-height: 1.55 !important; font-weight: 700 !important; }
   .kai-scope div[data-testid="stMarkdownContainer"] h4 { font-size: 1.06rem !important; line-height: 1.55 !important; font-weight: 700 !important; }
+  /* 完整报告：标题再小两档，避免突兀 */
+  .full-report-scope div[data-testid="stMarkdownContainer"] h1 { font-size: 1.10rem !important; }
+  .full-report-scope div[data-testid="stMarkdownContainer"] h2 { font-size: 1.04rem !important; }
+  .full-report-scope div[data-testid="stMarkdownContainer"] h3 { font-size: 1.00rem !important; }
+  .full-report-scope div[data-testid="stMarkdownContainer"] h4 { font-size: 0.98rem !important; }
   .kai-scope div[data-testid="stMarkdownContainer"] p,
   .kai-scope div[data-testid="stMarkdownContainer"] li {
     color: #1a1a1a !important;
@@ -1137,54 +1248,75 @@ def render_result_page(sb: Optional[Any]) -> None:
     st.markdown(f'<div class="herti-meta">{_esc_html(str(title))}</div>', unsafe_allow_html=True)
     summary = st.session_state.report_data or {}
 
-    # 模块 1：总分（百分制）+ 四维度分数（总分下直接展示）
+    # 预处理：分维度 + 行动提炼
     dims: Dict[str, Dict[str, Any]] = {}
+    total100 = 0
+    rating = ""
+    hi = ""
+    pi = ""
+    stg = ""
+    exe = ""
     if isinstance(summary, dict):
         dims = _normalize_dimension_scores(summary)
         total100 = clamp_int_score(summary.get("score"))
         rating = str(summary.get("rating_label") or "").strip()
-        st.markdown(
-            "<div class='card'><div class='card-title report-title-kai-gold'>总分 Total</div></div>",
-            unsafe_allow_html=True,
-        )
-        lines = [f"- 总分：{total100}/100" + (f"｜{rating}" if rating else "")]
-        for k in ["市场定位匹配度", "卖点竞争力", "价格带合理性", "冷启动可操作性"]:
-            it = dims.get(k) or {}
-            sc = it.get("score", "")
-            cm = it.get("comment", "")
-            lines.append(f"- {k}：{sc}/25｜{cm}")
-        st.markdown('<div class="kai-scope">\n' + "\n".join(lines) + "\n</div>", unsafe_allow_html=True)
-
-        # 模块 2：分维度打分 + 亮点/痛点/要做的事（简洁）
-        st.markdown(
-            "<div class='card'><div class='card-title report-title-kai-gold'>要点 Key Points</div></div>",
-            unsafe_allow_html=True,
-        )
-        pts: List[str] = []
-        pts.append("#### **分维度打分 Dimension**")
-        for k in ["市场定位匹配度", "卖点竞争力", "价格带合理性", "冷启动可操作性"]:
-            it = dims.get(k) or {}
-            pts.append(f"- {k}：{it.get('score','')}/25｜{it.get('comment','')}")
         hi = str(summary.get("highlights") or "").strip()
         pi = str(summary.get("pitfalls") or "").strip()
         stg = str(summary.get("strategy_brief") or "").strip()
         exe = str(summary.get("execution") or "").strip()
-        if hi:
-            pts.append("")
-            pts.append("#### **商家亮点 Highlights**")
-            pts.append(f"- {hi}")
-        if pi:
-            pts.append("")
-            pts.append("#### **商家痛点 Pitfalls**")
-            pts.append(f"- {pi}")
-        if stg or exe:
-            pts.append("")
-            pts.append("#### **要做的事 Action**")
-            if stg:
-                pts.append(f"- {stg}")
-            if exe:
-                pts.append(f"- {exe}")
-        st.markdown('<div class="kai-scope">\n' + "\n".join(pts) + "\n</div>", unsafe_allow_html=True)
+    action_items = _extract_action_items(exe, stg, limit=4)
+
+    # 1) 总分卡片（最顶部，视觉焦点）
+    st.markdown(
+        f"""
+<div class="card kai-scope">
+  <div class="card-title report-title-kai-gold">总分 Total</div>
+  <div style="font-family: KaiTi, 'KaiTi_GB2312','STKaiti','Songti SC','Noto Serif SC',serif;color:#7a6328;font-weight:800;font-size:46px;letter-spacing:.04em;line-height:1.05;">
+    {int(total100)}/100
+  </div>
+  <div style="margin-top:10px;color:var(--muted);font-size:13px;line-height:1.6;">
+    {_esc_html(rating or "—")}
+  </div>
+  <div style="margin-top:12px;border-top:1px solid rgba(0,0,0,0.10);padding-top:12px;font-size:14px;line-height:1.9;">
+    <div style="color:#7a6328;font-weight:700;letter-spacing:.08em;margin-bottom:6px;">分数构成</div>
+    <div>市场定位匹配度：{_esc_html(str((dims.get("市场定位匹配度") or {}).get("score","")))} /25</div>
+    <div>卖点竞争力：{_esc_html(str((dims.get("卖点竞争力") or {}).get("score","")))} /25</div>
+    <div>价格带合理性：{_esc_html(str((dims.get("价格带合理性") or {}).get("score","")))} /25</div>
+    <div>冷启动可操作性：{_esc_html(str((dims.get("冷启动可操作性") or {}).get("score","")))} /25</div>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    # 2) 分维度分析（紧跟总分）
+    st.markdown(
+        """
+<div class="card kai-scope">
+  <div class="card-title report-title-kai-gold">分维度分析 | KEY POINTS</div>
+""",
+        unsafe_allow_html=True,
+    )
+    dim_lines: List[str] = []
+    for k in ["市场定位匹配度", "卖点竞争力", "价格带合理性", "冷启动可操作性"]:
+        it = dims.get(k) or {}
+        sc = it.get("score", "")
+        cm = it.get("comment", "")
+        dim_lines.append(f"{k}：{sc}/25 | {cm}")
+    st.markdown("\n".join([f"- {x}" for x in dim_lines]))
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # 3) 关键策略提炼（新增模块）
+    st.markdown(
+        "<div class='card kai-scope'><div class='card-title report-title-kai-gold'>关键行动清单</div></div>",
+        unsafe_allow_html=True,
+    )
+    items = action_items[:4] if action_items else []
+    if not items:
+        # 兜底：用亮点/痛点/执行中抽一句
+        items = [x for x in [exe, stg, hi, pi] if x][:4]
+    md = ["- " + x for x in items[:4]]
+    st.markdown('<div class="kai-scope">\n' + "\n".join(md) + "\n</div>", unsafe_allow_html=True)
 
     # 价格带建议：不改模型逻辑，只做 UI 展示
     price_band = str(snap.get("price_band") or "").strip()
@@ -1197,7 +1329,7 @@ def render_result_page(sb: Optional[Any]) -> None:
 
     st.markdown('<div class="hr-soft"></div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="card-title report-title-kai-gold" style="text-align:center;margin-top:4px;">完整报告 Full Report</div>',
+        '<div class="card-title report-title-kai-gold" style="text-align:center;margin-top:4px;font-size:11px;letter-spacing:.08em;">冷启动全流程报告（展开查看）</div>',
         unsafe_allow_html=True,
     )
 
@@ -1226,22 +1358,22 @@ def render_result_page(sb: Optional[Any]) -> None:
                 except Exception as ex:
                     st.error(f"创建订阅链接失败：{ex}")
     else:
-        with st.expander("展开查看完整报告", expanded=True):
-            st.markdown('<div class="kai-scope">\n' + full_md + "\n</div>", unsafe_allow_html=True)
+        with st.expander("展开查看完整报告", expanded=False):
+            st.markdown('<div class="kai-scope full-report-scope">\n' + full_md + "\n</div>", unsafe_allow_html=True)
 
-    # 最后：分享/导出（放在完整报告后面）
-    share_on = bool(st.session_state.get("share_mode"))
+    # 5) 分享 / 打印功能区（最底部）
+    st.markdown('<div class="hr-soft"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="card-title report-title-kai-gold" style="text-align:center;">分享 / 打印</div>', unsafe_allow_html=True)
     cshare1, cshare2 = st.columns(2, gap="medium")
     with cshare1:
-        if st.button("分享结果（生成长图）", key="btn_share_long_poster"):
-            st.session_state.share_mode = not share_on
-            st.rerun()
+        if st.button("分享结果（生成长图并保存）", key="btn_share_long_img"):
+            st.session_state.share_mode = True
     with cshare2:
         try:
             export_summary = st.session_state.report_data if isinstance(st.session_state.report_data, dict) else {}
             html = _make_printable_html(snap if isinstance(snap, dict) else {}, export_summary, str(full_md))
             st.download_button(
-                "下载结果HTML（可打印为PDF）",
+                "打印为 PDF（下载HTML）",
                 data=html.encode("utf-8"),
                 file_name="xhs_result.html",
                 mime="text/html",
@@ -1250,14 +1382,32 @@ def render_result_page(sb: Optional[Any]) -> None:
             pass
 
     if st.session_state.get("share_mode"):
-        st.markdown('<div class="card"><div class="card-title report-title-kai-gold">分享长图预览</div></div>', unsafe_allow_html=True)
-        st.caption("提示：向下滑动查看完整长图，iPhone 可直接截图/长截图保存。")
-        try:
-            export_summary = st.session_state.report_data if isinstance(st.session_state.report_data, dict) else {}
-            poster_html = _make_printable_html(snap if isinstance(snap, dict) else {}, export_summary, str(full_md))
-            st.components.v1.html(poster_html, height=900, scrolling=True)
-        except Exception:
-            pass
+        # 生成长图：卡片内完成，用户生成后可“下载 PNG”，或 iPhone 长按保存
+        poster_title = f"{title} · {int(total100)}/100"
+        # 分享长图内容：只放“总分 + 分维度 + 行动清单”，避免太长难保存
+        poster_body = f"""
+<div style="font-family: KaiTi, 'KaiTi_GB2312','STKaiti','Songti SC','Noto Serif SC',serif;">
+  <div style="color:#7a6328;font-weight:800;font-size:22px;letter-spacing:.06em;">{_esc_html(str(title))}</div>
+  <div style="margin-top:10px;color:#7a6328;font-weight:900;font-size:44px;line-height:1;">{int(total100)}/100</div>
+  <div style="margin-top:8px;color:#555;font-size:13px;">{_esc_html(rating or '')}</div>
+  <div style="margin-top:12px;border-top:1px solid rgba(0,0,0,0.10);padding-top:10px;font-size:13px;line-height:1.8;">
+    <div style="color:#7a6328;font-weight:700;margin-bottom:6px;">分维度</div>
+    <div>市场定位匹配度：{_esc_html(str((dims.get("市场定位匹配度") or {}).get("score","")))} /25｜{_esc_html(str((dims.get("市场定位匹配度") or {}).get("comment","")))} </div>
+    <div>卖点竞争力：{_esc_html(str((dims.get("卖点竞争力") or {}).get("score","")))} /25｜{_esc_html(str((dims.get("卖点竞争力") or {}).get("comment","")))} </div>
+    <div>价格带合理性：{_esc_html(str((dims.get("价格带合理性") or {}).get("score","")))} /25｜{_esc_html(str((dims.get("价格带合理性") or {}).get("comment","")))} </div>
+    <div>冷启动可操作性：{_esc_html(str((dims.get("冷启动可操作性") or {}).get("score","")))} /25｜{_esc_html(str((dims.get("冷启动可操作性") or {}).get("comment","")))} </div>
+  </div>
+  <div style="margin-top:12px;border-top:1px solid rgba(0,0,0,0.10);padding-top:10px;font-size:13px;line-height:1.8;">
+    <div style="color:#7a6328;font-weight:700;margin-bottom:6px;">关键行动清单</div>
+    {''.join([f"<div>• {_esc_html(x)}</div>" for x in (items[:4] if items else [])])}
+  </div>
+  <div style="margin-top:12px;color:#777;font-size:11px;">由冷启动分析器生成 · 可截图保存</div>
+</div>
+"""
+        st.markdown('<div class="card kai-scope"><div class="card-title report-title-kai-gold">分享长图</div></div>', unsafe_allow_html=True)
+        st.caption("点“生成长图”后即可保存：优先点“下载长图PNG”；若 iPhone 不支持下载按钮，则点开图片后长按保存。")
+        comp = _make_share_long_image_component_html(poster_title, poster_body)
+        st.components.v1.html(comp, height=780, scrolling=True)
 
     st.markdown('<div class="footer-note">© 2026 Merchant Launch · 仅供策略参考</div>', unsafe_allow_html=True)
 
