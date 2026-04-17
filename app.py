@@ -46,75 +46,64 @@ XHS_BASE_OPTIONS = [
 # ---------------------------------------------------------------------------
 # System prompt：专业分析师 + 固定 6 大模块 + 输出格式（含摘要 JSON 便于前端展示）
 # ---------------------------------------------------------------------------
-SYSTEM_PROMPT_ANALYST = """你是一位资深「小红书品牌营销分析师」，当前只服务【从未在小红书投放过、0站内数据、新入场】的商家。你的文风：专业、数据化、结构化、有判断、有依据、有策略，完全对标高水准品牌方案。
+SYSTEM_PROMPT_ANALYST = """你是一位资深「小红书品牌营销分析师」，只服务【从未在小红书投放过、0站内数据、新入场】的商家。文风：专业、判断清晰、可执行；为显著缩短生成时间，必须遵守下文篇幅与结构，禁止灌水、禁止长论证。
 
-请等待用户输入：1）品类 2）月预算 3）产品核心卖点（用户还可能补充单品价格带、品牌名、目标人群、账号基础等，可作为辅助约束）。
+请从用户消息读取：品类、月预算、产品核心卖点；以及可能提供的品牌名、价格带、目标人群、账号基础等辅助约束。只基于这些信息输出。
 
-生成一份完整、深度、数据感强、篇幅约2000字以上的《小红书冷启动成功率分析报告》。报告排版清晰、章节完整、内容极度详实，不允许简略、不允许空洞。
+【性能与篇幅（必须严格遵守，用于显著缩短生成时间）】
+1) 全文总字数严格控制在 100–1500 字（中文，含标点与 Markdown 符号）。
+2) 六大模块（见后文）每一模块只允许 150–250 字：先给 1 句结论，再给 3–6 条要点（短句，用无序列表 `-`），禁止长段落铺陈与重复论证。
+3) 禁止输出与业务无关的铺垫、免责声明长段、重复总结；禁止复述提示词/系统设定；禁止输出「模型思考过程」或中间推理。
+4) 为降低耗时：优先输出「结论 → 关键依据（可极短） → 可执行动作」，不要展开案例细节。
 
-=== 输出固定6大模块（必须全部写满，不可省略）===
-一、市场赛道机会分析（必须包含：品类供需格局、平台搜索趋势、行业竞争格局、红利判断、对标头部优秀方案的赛道定位）
-二、目标人群匹配度深度分析（必须包含：核心人群画像、性别/年龄/城市/婚姻/消费力/场景偏好、高潜破圈人群、人群匹配度评分、匹配依据）
-三、产品适配性与内容可行性分析（必须包含：内容适配类型、核心卖点承接、关键词布局、合规风险评估、可量产笔记方向）
-四、小红书30天冷启动营销策略（必须包含：三阶段节奏：蓄水期→种草期→爆发期、预算分配比例、KFS种草模型、搜索卡位策略、流量路径）
-五、冷启动成功率综合判定（必须包含：成功率评级、核心成功优势、核心风险点、30天量化目标）
-六、冷启动执行标准与止损红线（必须包含：成功指标、内容底线、投放红线、止损条件）
+【输出顺序（必须严格遵守，不得颠倒）】
+A) 先输出 <<<SUMMARY_JSON>>>…<<<END_SUMMARY_JSON>>>（字段必须齐全，且必须包含 dimension_scores；两个标记字符串必须原样出现；JSON 内不得再包含上述标记子串）。
+B) JSON 之后，Markdown 正文必须严格按以下顺序输出（块之间最多一个空行）：
+   1) 第一块：单独一行二级标题：`## 总分`
+      - 标题下第一行只写：`总分：X/80｜` + 评级一句话（整段不超过 40 字，含标点）
+      - 其中 X 必须等于 SUMMARY_JSON.score，且等于四维度 score 之和；满分 80（四维度各 1–20）。不要在本块重复四维度明细。
+   2) 第二块：单独一行二级标题：`## 总分评览`
+      - 用无序列表列出四维度分数与一句话点评，键名与顺序固定为：市场定位匹配度 → 卖点竞争力 → 价格带合理性 → 冷启动可操作性
+      - 列表内容必须与 SUMMARY_JSON.dimension_scores 完全一致（分数与 comment 不得改写、不得矛盾）。
+   3) 第三块起才是完整报告正文：六大模块（见后文），遵守标题规范。
 
-=== 强制要求 ===
-1. 全文必须≥2000字（中文），每个模块都要有完整推导，不写短句、不做简略版。
-2. 只针对【从未投放过小红书】的新商家，不涉及历史站内数据、不做账号诊断。
-3. 网页友好排版：使用 Markdown，大标题用 # / ##，小标题用 ###，有序列表、加粗重点；不要使用复杂 HTML。
-4. 若需引用“数据”，请用“行业公开口径/平台趋势推演/合理区间估计”等方式表述，避免编造不可验证的具体站内数据。
-5. 严禁输出任何与用户当前输入无关的旧参考文案/模板/案例内容；严禁提及任何参考品牌、历史资料或内部代号（包括但不限于“帅康”等）。如你在生成过程中出现这些词或相关段落，必须立即删除并重写为通用表达，只保留针对用户当前产品与信息的分析。
-6. 不要复述“你被提供过的参考资料/原文/示例”；不要引用任何既有方案原句。输出必须是面向当前用户输入产品的原创分析与可执行策略。
+【Markdown 标题规范（必须严格遵守：解决「小标题太大」）】
+1) 六大模块大标题统一使用二级标题：`## 一、…` 至 `## 六、…`（禁止使用一级标题 `#`）。
+2) 模块内小标题统一使用四级标题，且必须加粗：写成 `#### **1) 标题**` 形式，按需递增编号（禁止使用 `###` 作为模块内小标题）。
+3) 除上述小标题自带加粗外，每个模块正文内额外加粗（`**…**`）不超过 2 处。
 
-=== 输出格式（必须严格遵守，便于程序解析）===
-先输出一段 JSON（单行或多行均可），用如下标记包裹：
+【六大模块（必须全部出现、顺序固定、不可省略）】
+## 一、市场赛道机会分析
+## 二、目标人群匹配度深度分析
+## 三、产品适配性与内容可行性分析
+## 四、小红书30天冷启动营销策略
+## 五、冷启动成功率综合判定
+## 六、冷启动执行标准与止损红线
 
-<<<SUMMARY_JSON>>>
-{ ... JSON ... }
-<<<END_SUMMARY_JSON>>>
+每个模块须用短句覆盖关键维度（赛道/人群/内容/30天节奏与预算/成功-风险-目标/指标与止损），但禁止展开成长段落与案例细节。
 
-JSON 字段必须为：
-{
-  "score": 0-100 的整数,
-  "rating_label": "成功率评级文字（如：中高 / 中等偏上 等）",
-  "highlights": "核心优点（亮点总结，200字以内，条理化）",
-  "pitfalls": "痛点与避雷点（运营避坑清单，250字以内）",
-  "strategy_brief": "冷启动策略要点总览（300字以内，覆盖蓄水/种草/爆发与预算逻辑）",
-  "execution": "执行建议（可立即落地的行动清单，200字以内）"
-}
+【SUMMARY_JSON 字段（必须齐全）】
+JSON 必须包含：score、rating_label、highlights、pitfalls、strategy_brief、execution、dimension_scores。
+建议长度上限（中文）：rating_label 12 字内；highlights / pitfalls / execution 各 80 字内；strategy_brief 100 字内（为总篇幅服务，越短越好）。
 
-然后在 JSON 之后输出完整 Markdown 报告正文（包含上述六大模块，标题清晰）。
-
-注意：<<<SUMMARY_JSON>>> 与 <<<END_SUMMARY_JSON>>> 标记必须原样出现；JSON 内不要包含上述标记字符串。
-
-【评分与输出强约束（必须严格遵守，否则视为失败并重写）】
-1) 你必须在 SUMMARY_JSON 中新增字段 dimension_scores，用于分维度打分；并保证：
-- 总分 score = 四个维度分数之和
-- 每个维度分数为 1-20 的整数
-- 每个维度都必须附带一句话点评（20字以内，直指原因，不要空话）
-
-dimension_scores 结构必须为：
+【分维度打分（必须严格遵守）】
+1) dimension_scores 结构固定为（键名必须一字不差）：
 "dimension_scores": {
-  "市场定位匹配度": {"score": 1-20整数, "comment": "一句话点评"},
-  "卖点竞争力": {"score": 1-20整数, "comment": "一句话点评"},
-  "价格带合理性": {"score": 1-20整数, "comment": "一句话点评"},
-  "冷启动可操作性": {"score": 1-20整数, "comment": "一句话点评"}
+  "市场定位匹配度": {"score": 1-20 的整数, "comment": "一句话点评（<=20 字）"},
+  "卖点竞争力": {"score": 1-20 的整数, "comment": "一句话点评（<=20 字）"},
+  "价格带合理性": {"score": 1-20 的整数, "comment": "一句话点评（<=20 字）"},
+  "冷启动可操作性": {"score": 1-20 的整数, "comment": "一句话点评（<=20 字）"}
 }
+2) score 必须为整数，且严格等于上述四个 score 之和。因每项为 1–20，score 仅能取 4–80（与维度刻度一致）；不得出现与四维度之和不一致的数值。
+3) Markdown 的「## 总分」「## 总分评览」必须与 JSON 完全一致（分数与点评不得矛盾）。
 
-2) SUMMARY_JSON 的 score 字段必须是 0-100 的整数，且必须等于四维度分数之和（不允许不一致）。
-3) 报告正文开头必须先给出“总分 + 四维度分数”的简洁展示（Markdown），示例格式如下（仅示例格式，内容你要按实际填写）：
+【禁止项】
+1) 禁止输出任何 HTML、CSS、JS、代码围栏（禁止使用 ```）；除 SUMMARY_JSON 标记块外，禁止任何代码块。
+2) 禁止输出任何历史参考文案/品牌/模板内容（包括但不限于「帅康」等）；禁止输出与当前用户输入无关的内容。
+3) 若需引用「数据」，请用行业公开口径/平台趋势推演/合理区间估计等方式表述，避免编造不可验证的具体站内明细数据。
+4) 不要复述你被提供过的参考资料/原文/示例；不要引用既有方案原句。
 
-## 评分总览
-- 总分：72/80（四维度之和）
-- 市场定位匹配度：18/20｜一句话点评
-- 卖点竞争力：17/20｜一句话点评
-- 价格带合理性：20/20｜一句话点评
-- 冷启动可操作性：17/20｜一句话点评
-
-4) 全文只输出与你当前用户输入相关的分析；禁止输出任何历史参考文案/品牌/模板内容（包括但不限于“帅康”等）。
-5) 不要输出任何 HTML、CSS、JS 或代码块；只输出 JSON + Markdown。
+只输出：A 的标记 JSON 块 + B 的 Markdown 正文；不要输出任何前后缀说明文字。
 """
 
 
@@ -450,8 +439,12 @@ def parse_model_output(raw: str) -> Tuple[Optional[Dict[str, Any]], str, Optiona
     report_md = _sanitize_no_legacy_reference(rest.strip())
     if summary is None:
         return None, report_md, "模型未按约定输出摘要块（<<<SUMMARY_JSON>>>…<<<END_SUMMARY_JSON>>>），请重试。"
-    if len(report_md) < 500:
-        return summary, report_md, "报告正文过短，可能被截断，请重试或调大模型输出限制。"
+    if len(report_md) < 80:
+        return summary, report_md, "报告正文过短或未按约定输出，请重试。"
+    if "## 总分" not in report_md or "## 总分评览" not in report_md:
+        return summary, report_md, "报告正文缺少必需的「## 总分」或「## 总分评览」，请重试。"
+    if "```" in report_md:
+        return summary, report_md, "报告正文不应包含代码围栏（```），请重试。"
 
     # 摘要字段同样做轻量过滤，防止禁用词出现在卡片里
     try:
@@ -470,6 +463,62 @@ def clamp_int_score(v: Any) -> int:
     except Exception:
         return 0
     return max(0, min(100, n))
+
+
+def _ensure_local_history() -> List[Dict[str, Any]]:
+    """
+    本地历史（仅 session 内）：当未配置 Supabase 时也能查看/下载。
+    """
+    if "local_history" not in st.session_state or not isinstance(st.session_state.get("local_history"), list):
+        st.session_state.local_history = []
+    return st.session_state.local_history
+
+
+def _push_local_history(snapshot: Dict[str, Any], *, summary: Optional[Dict[str, Any]], report_md: str) -> None:
+    hist = _ensure_local_history()
+    item = {
+        "id": str(uuid.uuid4()),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "snapshot": snapshot,
+        "summary": summary or {},
+        "report_md": report_md or "",
+    }
+    hist.insert(0, item)
+    # 仅保留最近 30 条，避免 session 过大
+    del hist[30:]
+
+
+def _make_printable_html(snapshot: Dict[str, Any], summary: Dict[str, Any], report_md: str) -> str:
+    """
+    生成“可打印 HTML”：
+    - 用户下载后用浏览器打印：可保存为 PDF；也可系统导出/截图为图片
+    - 不依赖额外 PDF 渲染依赖，保证 Streamlit Cloud 可用
+    """
+    title = str(snapshot.get("brand_name") or snapshot.get("category") or "小红书冷启动报告").strip()
+    created = datetime.now().strftime("%Y-%m-%d %H:%M")
+    score = summary.get("score", "")
+    rating = summary.get("rating_label", "")
+    safe_md = (report_md or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    css = """
+<style>
+  @page { size: A4; margin: 14mm; }
+  body { font-family: KaiTi, "KaiTi_GB2312", "STKaiti", "Songti SC", "Noto Serif SC", serif; color:#111; }
+  .meta { color:#555; font-size:12px; margin-top:4px; }
+  h1 { font-size:20px; margin:0; color:#7a6328; }
+  .badge { margin-top:10px; padding:10px 12px; border:1px solid #ddd; border-radius:10px; }
+  .badge b { color:#7a6328; }
+  pre { white-space: pre-wrap; word-break: break-word; font-size:13px; line-height:1.75; margin-top:14px; }
+  .hr { height:1px; background:#eee; margin:14px 0; }
+</style>
+"""
+    head = f"<h1>{_esc_html(title)}</h1><div class='meta'>生成时间：{_esc_html(created)}</div>"
+    badge = (
+        "<div class='badge'>"
+        f"<b>总分</b>：{_esc_html(str(score))}/80"
+        + (f"｜{_esc_html(str(rating))}" if rating else "")
+        + "</div>"
+    )
+    return f"<!doctype html><html><head><meta charset='utf-8'>{css}</head><body>{head}{badge}<div class='hr'></div><pre>{safe_md}</pre></body></html>"
 
 
 def _normalize_dimension_scores(summary: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -491,7 +540,7 @@ def _normalize_dimension_scores(summary: Dict[str, Any]) -> Dict[str, Dict[str, 
             cm = ""
             if isinstance(item, dict) and isinstance(item.get("comment"), str):
                 cm = _sanitize_no_legacy_reference(item.get("comment") or "").strip()
-            out[k] = {"score": sc, "comment": cm[:40]}
+            out[k] = {"score": sc, "comment": cm[:20]}
             ssum += sc
         # 确保总分一致：以维度之和为准（上限 80），并同步回 summary
         total80 = max(0, min(80, ssum))
@@ -726,7 +775,7 @@ def build_generation_prompt(snapshot: Dict[str, str]) -> str:
 - 目标人群：{snapshot.get("target_audience") or "（未提供）"}
 - 当前小红书基础：{snapshot.get("xhs_base") or "（未提供）"}
 
-请严格按 system 指令输出（先 SUMMARY_JSON 标记块，再 Markdown 六大模块正文）。"""
+请严格按 system 指令输出：先 SUMMARY_JSON 标记块；再 Markdown，且正文必须以「## 总分」「## 总分评览」开头两段，其后才是「## 一、…」至「## 六、…」六大模块。"""
 
 
 def _load_history_into_state(sb: Any, row_id: str) -> None:
@@ -750,6 +799,23 @@ def _load_history_into_state(sb: Any, row_id: str) -> None:
     st.rerun()
 
 
+def _load_local_history_into_state(item: Dict[str, Any]) -> None:
+    snap = dict(item.get("snapshot") or {})
+    st.session_state.input_snapshot = snap
+    st.session_state.form_brand = str(snap.get("brand_name") or "")
+    st.session_state.form_category = str(snap.get("category") or "")
+    st.session_state.form_price_band = str(snap.get("price_band") or FORM_DEFAULTS["form_price_band"])
+    st.session_state.form_selling = str(snap.get("selling_points") or "")
+    st.session_state.form_audience = str(snap.get("target_audience") or "")
+    st.session_state.form_xhs_base = str(snap.get("xhs_base") or FORM_DEFAULTS["form_xhs_base"])
+    st.session_state.form_monthly_budget = str(snap.get("monthly_budget") or FORM_DEFAULTS["form_monthly_budget"])
+    st.session_state.report_data = item.get("summary") or {}
+    st.session_state.report_markdown = str(item.get("report_md") or "")
+    st.session_state.report_unlocked = True
+    st.session_state.page = "result"
+    st.rerun()
+
+
 def render_home_page(sb: Optional[Any]) -> None:
     st.markdown('<div class="herti-eyebrow">MERCHANT LAUNCH<br/>— a growth strategy map —</div>', unsafe_allow_html=True)
     st.markdown('<div class="herti-title">商船下水</div>', unsafe_allow_html=True)
@@ -758,7 +824,7 @@ def render_home_page(sb: Optional[Any]) -> None:
         '<div class="herti-lead">流量藏在细节里，<br/>但你的产品里，有一套专属的增长逻辑，<br/>正等待被精准激活。</div>',
         unsafe_allow_html=True,
     )
-    st.markdown('<div class="herti-meta">20+分析维度 · 1次智能生成 · 约3分钟</div>', unsafe_allow_html=True)
+    st.markdown('<div class="herti-meta">20+分析维度 · 1次智能生成 · 约1–2分钟</div>', unsafe_allow_html=True)
 
     # 只保留一个简洁输入框 + 两个核心按钮
     st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -769,10 +835,6 @@ def render_home_page(sb: Optional[Any]) -> None:
     gen_busy = bool(st.session_state.get("llm_busy"))
     if st.button("开始分析", type="primary", disabled=gen_busy, key="btn_start_home"):
         st.session_state.page = "form"
-        st.rerun()
-
-    if st.button("查看历史分析", key="btn_go_history"):
-        st.session_state.page = "history"
         st.rerun()
 
     st.markdown('<div class="footer-note">请输入你的产品信息，开始分析</div>', unsafe_allow_html=True)
@@ -788,7 +850,25 @@ def render_history_page(sb: Optional[Any]) -> None:
         st.rerun()
 
     if sb is None or not supabase_enabled():
-        st.info("未配置 Supabase，无法查看云端历史。")
+        st.info("未配置 Supabase，将展示本地历史（仅本次会话内保存）。")
+        hist_local = _ensure_local_history()
+        if not hist_local:
+            st.info("暂无历史记录。")
+            return
+        for row in hist_local:
+            snap = row.get("snapshot") or {}
+            label = f"{str(row.get('created_at',''))[:19]} · {snap.get('category','')} · {snap.get('price_band','')}"
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown(f'<div class="card-title">{_esc_html(label)}</div>', unsafe_allow_html=True)
+            selling = str(snap.get("selling_points", "") or "")
+            st.markdown(
+                f'<div class="card-body" style="color:var(--muted);font-size:13px;line-height:1.8;">'
+                f'卖点：{_esc_html(selling[:120])}{"…" if len(selling)>120 else ""}</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("打开这份报告", key=f"open_local_hist_{row.get('id','')}"):
+                _load_local_history_into_state(row)
+            st.markdown("</div>", unsafe_allow_html=True)
         return
     hist = load_history(sb)
     if not hist:
@@ -796,13 +876,12 @@ def render_history_page(sb: Optional[Any]) -> None:
         return
 
     for row in hist:
-        snap = row.get("input_snapshot") or {}
-        label = f"{row.get('created_at', '')[:19]} · {snap.get('category', '')} · {snap.get('price_band', '')}"
+        label = f"{row.get('created_at', '')[:19]} · {row.get('category', '')} · {row.get('price_range', '')}"
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown(f'<div class="card-title">{_esc_html(label)}</div>', unsafe_allow_html=True)
         st.markdown(
             f'<div class="card-body" style="color:var(--muted);font-size:13px;line-height:1.8;">'
-            f'卖点：{_esc_html(str(snap.get("selling_points",""))[:120])}…</div>',
+            f'品牌：{_esc_html(str(row.get("brand_name",""))[:40])}</div>',
             unsafe_allow_html=True,
         )
         if st.button("打开这份报告", key=f"open_hist_{row['id']}"):
@@ -822,9 +901,8 @@ def render_form_page(sb: Optional[Any]) -> None:
             st.session_state.page = "home"
             st.rerun()
     with top_r:
-        if st.button("查看历史分析", key="go_history_from_form"):
-            st.session_state.page = "history"
-            st.rerun()
+        # 按需求移除“历史分析”入口（保留空列用于布局对齐）
+        st.markdown("")
 
     # 6 张输入卡片（按你要求的结构）；保持原有清空按钮与表单持久化
     st.markdown('<div class="card"><div class="card-title">01 / BRAND</div>', unsafe_allow_html=True)
@@ -895,7 +973,7 @@ def render_form_page(sb: Optional[Any]) -> None:
         try:
             snap = dict(st.session_state.get("input_snapshot") or {})
             user_prompt = build_generation_prompt(snap)
-            with st.spinner("正在生成你的冷启动增长方案，约 3 分钟…"):
+            with st.spinner("正在生成你的冷启动增长方案，约 1–2 分钟…"):
                 try:
                     raw = call_llm_backend(
                         backend_url,
@@ -950,6 +1028,11 @@ def render_form_page(sb: Optional[Any]) -> None:
 
                     if sb is not None and supabase_enabled():
                         save_analysis_cloud(sb, snap, report_md)
+                    # 无 Supabase 也保留本地历史（仅本次会话）
+                    try:
+                        _push_local_history(snap, summary=st.session_state.report_data, report_md=report_md)
+                    except Exception:
+                        pass
 
                     st.session_state.page = "result"
                     st.rerun()
@@ -1012,16 +1095,36 @@ def render_result_page(sb: Optional[Any]) -> None:
     st.markdown(
         """
 <style>
-  /* Only affects current page render; Streamlit re-renders per page */
-  .kai-scope, .kai-scope * {
-    font-family: KaiTi, 楷体, KaiTi_GB2312, STKaiti, serif !important;
+  .kai-scope,
+  .kai-scope * {
+    font-family: KaiTi, "KaiTi_GB2312", "STKaiti", "Songti SC", "Noto Serif SC", serif !important;
   }
-  /* Markdown containers on result page */
+  .kai-scope div[data-testid="stMarkdownContainer"],
   .kai-scope div[data-testid="stMarkdownContainer"] * {
-    font-family: KaiTi, 楷体, KaiTi_GB2312, STKaiti, serif !important;
+    font-family: KaiTi, "KaiTi_GB2312", "STKaiti", "Songti SC", "Noto Serif SC", serif !important;
+  }
+  /* 报告内标题：暗金色 + 仍为楷体栈（由上层继承） */
+  .kai-scope div[data-testid="stMarkdownContainer"] h1,
+  .kai-scope div[data-testid="stMarkdownContainer"] h2,
+  .kai-scope div[data-testid="stMarkdownContainer"] h3,
+  .kai-scope div[data-testid="stMarkdownContainer"] h4 {
+    color: #7a6328 !important;
+  }
+  .kai-scope div[data-testid="stMarkdownContainer"] h1 { font-size: 1.22rem !important; line-height: 1.55 !important; font-weight: 700 !important; }
+  .kai-scope div[data-testid="stMarkdownContainer"] h2 { font-size: 1.16rem !important; line-height: 1.55 !important; font-weight: 700 !important; }
+  .kai-scope div[data-testid="stMarkdownContainer"] h3 { font-size: 1.10rem !important; line-height: 1.55 !important; font-weight: 700 !important; }
+  .kai-scope div[data-testid="stMarkdownContainer"] h4 { font-size: 1.06rem !important; line-height: 1.55 !important; font-weight: 700 !important; }
+  .kai-scope div[data-testid="stMarkdownContainer"] p,
+  .kai-scope div[data-testid="stMarkdownContainer"] li {
+    color: #1a1a1a !important;
+    font-size: 1.00rem !important;
+    line-height: 1.75 !important;
+  }
+  .report-title-kai-gold {
+    font-family: KaiTi, "KaiTi_GB2312", "STKaiti", "Songti SC", "Noto Serif SC", serif !important;
+    color: #7a6328 !important;
   }
 </style>
-<div class="kai-scope"></div>
 """,
         unsafe_allow_html=True,
     )
@@ -1037,7 +1140,10 @@ def render_result_page(sb: Optional[Any]) -> None:
             st.rerun()
 
     st.markdown('<div class="progress-line">RESULT</div>', unsafe_allow_html=True)
-    st.markdown('<div class="herti-title" style="font-size:30px;letter-spacing:.12em;">你的冷启动增长方案</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="herti-title report-title-kai-gold" style="font-size:30px;letter-spacing:.12em;">你的冷启动增长方案</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown(f'<div class="herti-meta">{_esc_html(str(title))}</div>', unsafe_allow_html=True)
     summary = st.session_state.report_data or {}
 
@@ -1046,7 +1152,7 @@ def render_result_page(sb: Optional[Any]) -> None:
         dims = _normalize_dimension_scores(summary)
         total80 = clamp_int_score(summary.get("score"))
         st.markdown(
-            "<div class='card'><div class='card-title'>评分总览</div></div>",
+            "<div class='card'><div class='card-title report-title-kai-gold'>评分总览</div></div>",
             unsafe_allow_html=True,
         )
         lines = [f"- 总分：{total80}/80（四维度之和）"]
@@ -1055,7 +1161,10 @@ def render_result_page(sb: Optional[Any]) -> None:
             sc = it.get("score", "")
             cm = it.get("comment", "")
             lines.append(f"- {k}：{sc}/20｜{cm}")
-        st.markdown("\n".join(lines))
+        st.markdown(
+            '<div class="kai-scope">\n' + "\n".join(lines) + "\n</div>",
+            unsafe_allow_html=True,
+        )
 
     render_summary_cards(summary if isinstance(summary, dict) else {})
 
@@ -1064,20 +1173,46 @@ def render_result_page(sb: Optional[Any]) -> None:
     budget = str(snap.get("monthly_budget") or "").strip()
     price_hint = (f"当前选择：{price_band}。" if price_band else "未选择价格带。") + (f" 预算：{budget}。" if budget else "")
     st.markdown(
-        f'<div class="card"><div class="card-title">PRICE BAND</div><p style="margin:0;line-height:1.9;font-size:13px;color:var(--text);">{_esc_html(price_hint)}</p></div>',
+        f'<div class="card"><div class="card-title">PRICE BAND</div><p style="font-family: KaiTi, KaiTi_GB2312, STKaiti, Songti SC, Noto Serif SC, serif;margin:0;line-height:1.9;font-size:13px;color:var(--text);">{_esc_html(price_hint)}</p></div>',
         unsafe_allow_html=True,
     )
 
     st.markdown('<div class="hr-soft"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="card-title" style="text-align:center;margin-top:4px;">FULL REPORT</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="card-title report-title-kai-gold" style="text-align:center;margin-top:4px;">FULL REPORT</div>',
+        unsafe_allow_html=True,
+    )
 
     full_md = st.session_state.get("report_markdown") or ""
     unlocked = bool(st.session_state.get("report_unlocked"))
 
+    # 导出/打印：下载 HTML 后用浏览器“打印”可保存为 PDF；也可系统导出/截图为图片
+    try:
+        export_summary = st.session_state.report_data if isinstance(st.session_state.report_data, dict) else {}
+        html = _make_printable_html(snap if isinstance(snap, dict) else {}, export_summary, str(full_md))
+        cexp1, cexp2 = st.columns(2, gap="medium")
+        with cexp1:
+            st.download_button(
+                "下载可打印HTML（打印成PDF/图片）",
+                data=html.encode("utf-8"),
+                file_name="xhs_report_print.html",
+                mime="text/html",
+            )
+        with cexp2:
+            st.download_button(
+                "下载Markdown",
+                data=str(full_md).encode("utf-8"),
+                file_name="xhs_report.md",
+                mime="text/markdown",
+            )
+        st.caption("提示：下载 HTML 后用浏览器打开 → Ctrl+P（或分享/打印）→ 选择“保存为 PDF”；部分手机也可直接“另存为图片”。")
+    except Exception:
+        pass
+
     if (stripe_enabled() or stripe_subscription_enabled()) and not unlocked:
         st.info("完整版报告需付费解锁。以下为预览（前约 800 字）。")
         preview = full_md[:800] + ("…" if len(full_md) > 800 else "")
-        st.markdown(preview)
+        st.markdown('<div class="kai-scope">\n' + preview + "\n</div>", unsafe_allow_html=True)
         c_pay, c_sub = st.columns(2)
         with c_pay:
             if stripe_enabled():
@@ -1097,7 +1232,7 @@ def render_result_page(sb: Optional[Any]) -> None:
                     st.error(f"创建订阅链接失败：{ex}")
     else:
         with st.expander("展开查看完整报告", expanded=True):
-            st.markdown(full_md)
+            st.markdown('<div class="kai-scope">\n' + full_md + "\n</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="footer-note">© 2026 Merchant Launch · 仅供策略参考</div>', unsafe_allow_html=True)
 
@@ -1126,9 +1261,6 @@ def main() -> None:
     page = str(st.session_state.get("page") or "home")
     if page == "result" and (st.session_state.report_markdown or st.session_state.report_data):
         render_result_page(sb)
-        return
-    if page == "history":
-        render_history_page(sb)
         return
     if page == "form":
         render_form_page(sb)

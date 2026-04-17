@@ -120,7 +120,7 @@ def _invoke_once(client: Any, model: str, system_text: str, user_text: str) -> s
             {"role": "system", "content": system_text},
             {"role": "user", "content": user_text},
         ],
-        max_tokens=8192,
+        max_tokens=3200,
         temperature=0.2,
         stream=False,
     )
