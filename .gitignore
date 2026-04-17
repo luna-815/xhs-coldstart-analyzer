@@ -25,3 +25,4 @@ Thumbs.db
 .streamlit/*.toml
 .streamlit/*.toml.*
 .streamlit/*secrets*
+secrets.toml
