@@ -1,0 +1,27 @@
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Streamlit local secrets (建议忽略，避免误提交)
+.streamlit/secrets.toml
+.streamlit/*.toml
+.streamlit/*.toml.*
+.streamlit/*secrets*

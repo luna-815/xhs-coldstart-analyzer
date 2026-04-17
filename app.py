@@ -88,6 +88,33 @@ JSON 字段必须为：
 然后在 JSON 之后输出完整 Markdown 报告正文（包含上述六大模块，标题清晰）。
 
 注意：<<<SUMMARY_JSON>>> 与 <<<END_SUMMARY_JSON>>> 标记必须原样出现；JSON 内不要包含上述标记字符串。
+
+【评分与输出强约束（必须严格遵守，否则视为失败并重写）】
+1) 你必须在 SUMMARY_JSON 中新增字段 dimension_scores，用于分维度打分；并保证：
+- 总分 score = 四个维度分数之和
+- 每个维度分数为 1-20 的整数
+- 每个维度都必须附带一句话点评（20字以内，直指原因，不要空话）
+
+dimension_scores 结构必须为：
+"dimension_scores": {
+  "市场定位匹配度": {"score": 1-20整数, "comment": "一句话点评"},
+  "卖点竞争力": {"score": 1-20整数, "comment": "一句话点评"},
+  "价格带合理性": {"score": 1-20整数, "comment": "一句话点评"},
+  "冷启动可操作性": {"score": 1-20整数, "comment": "一句话点评"}
+}
+
+2) SUMMARY_JSON 的 score 字段必须是 0-100 的整数，且必须等于四维度分数之和（不允许不一致）。
+3) 报告正文开头必须先给出“总分 + 四维度分数”的简洁展示（Markdown），示例格式如下（仅示例格式，内容你要按实际填写）：
+
+## 评分总览
+- 总分：72/80（四维度之和）
+- 市场定位匹配度：18/20｜一句话点评
+- 卖点竞争力：17/20｜一句话点评
+- 价格带合理性：20/20｜一句话点评
+- 冷启动可操作性：17/20｜一句话点评
+
+4) 全文只输出与你当前用户输入相关的分析；禁止输出任何历史参考文案/品牌/模板内容（包括但不限于“帅康”等）。
+5) 不要输出任何 HTML、CSS、JS 或代码块；只输出 JSON + Markdown。
 """
 
 
@@ -443,6 +470,52 @@ def clamp_int_score(v: Any) -> int:
     except Exception:
         return 0
     return max(0, min(100, n))
+
+
+def _normalize_dimension_scores(summary: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """
+    返回四维度打分字典：
+    - 优先使用模型在 SUMMARY_JSON 中返回的 dimension_scores
+    - 若缺失/格式不合法，则基于总分自动补齐
+    """
+    total = clamp_int_score(summary.get("score"))
+    dims = summary.get("dimension_scores")
+    names = ["市场定位匹配度", "卖点竞争力", "价格带合理性", "冷启动可操作性"]
+    if isinstance(dims, dict) and all(k in dims for k in names):
+        out: Dict[str, Dict[str, Any]] = {}
+        ssum = 0
+        for k in names:
+            item = dims.get(k) or {}
+            sc = clamp_int_score((item.get("score") if isinstance(item, dict) else None))
+            sc = max(1, min(20, int(sc)))
+            cm = ""
+            if isinstance(item, dict) and isinstance(item.get("comment"), str):
+                cm = _sanitize_no_legacy_reference(item.get("comment") or "").strip()
+            out[k] = {"score": sc, "comment": cm[:40]}
+            ssum += sc
+        # 确保总分一致：以维度之和为准（上限 80），并同步回 summary
+        total80 = max(0, min(80, ssum))
+        summary["score"] = total80
+        return out
+
+    # 自动补齐（保持 1-20，四项之和 <= 80）
+    base = max(4, min(80, total if total else 60))
+    q, r = divmod(base, 4)
+    scores = [q] * 4
+    for i in range(r):
+        scores[i] += 1
+    comments = [
+        "与人群/场景匹配度",
+        "差异化与可传播性",
+        "客单/毛利与转化阻力",
+        "动作清晰度与执行成本",
+    ]
+    out = {}
+    for k, sc, cm in zip(names, scores, comments):
+        out[k] = {"score": max(1, min(20, int(sc))), "comment": cm}
+    summary["score"] = max(0, min(80, sum(v["score"] for v in out.values())))
+    summary["dimension_scores"] = out
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -858,6 +931,9 @@ def render_form_page(sb: Optional[Any]) -> None:
                 else:
                     if summary:
                         summary["score"] = clamp_int_score(summary.get("score"))
+                        # 分维度打分：优先使用模型返回，缺失则自动补齐（并同步总分为 0-80）
+                        if isinstance(summary, dict):
+                            _normalize_dimension_scores(summary)
 
                     st.session_state.report_data = summary or {
                         "score": 0,
@@ -896,33 +972,34 @@ def _esc_html(s: str) -> str:
 
 def render_summary_cards(summary: Dict[str, Any]) -> None:
     score = clamp_int_score(summary.get("score"))
+    # 结果页要求：评分/报告均为楷体（仅结果页注入 CSS，这里只调整卡片内字体）
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown(
             f'<div class="card"><div class="card-title">SCORE</div>'
-            f'<div style="font-family: Noto Serif SC, Times New Roman, serif; font-weight:700; font-size:34px; letter-spacing:.08em;">{score}</div>'
+            f'<div style="font-family: KaiTi, 楷体, KaiTi_GB2312, STKaiti, serif; font-weight:700; font-size:34px; letter-spacing:.08em;">{score}</div>'
             f'<div style="color:var(--muted);font-size:12px;letter-spacing:.08em;margin-top:6px;">{_esc_html(str(summary.get("rating_label", "")))}</div></div>',
             unsafe_allow_html=True,
         )
     with c2:
         st.markdown(
-            f'<div class="card"><div class="card-title">HIGHLIGHTS</div><p style="font-size:13px;line-height:1.9;color:var(--text);margin:0;">{_esc_html(str(summary.get("highlights", "")))}</p></div>',
+            f'<div class="card"><div class="card-title">HIGHLIGHTS</div><p style="font-family: KaiTi, 楷体, KaiTi_GB2312, STKaiti, serif; font-size:13px;line-height:1.9;color:var(--text);margin:0;">{_esc_html(str(summary.get("highlights", "")))}</p></div>',
             unsafe_allow_html=True,
         )
     with c3:
         st.markdown(
-            f'<div class="card"><div class="card-title">PITFALLS</div><p style="font-size:13px;line-height:1.9;color:var(--text);margin:0;">{_esc_html(str(summary.get("pitfalls", "")))}</p></div>',
+            f'<div class="card"><div class="card-title">PITFALLS</div><p style="font-family: KaiTi, 楷体, KaiTi_GB2312, STKaiti, serif; font-size:13px;line-height:1.9;color:var(--text);margin:0;">{_esc_html(str(summary.get("pitfalls", "")))}</p></div>',
             unsafe_allow_html=True,
         )
     c4, c5 = st.columns(2)
     with c4:
         st.markdown(
-            f'<div class="card"><div class="card-title">CORE STRATEGY</div><p style="font-size:13px;line-height:1.9;color:var(--text);margin:0;">{_esc_html(str(summary.get("strategy_brief", "")))}</p></div>',
+            f'<div class="card"><div class="card-title">CORE STRATEGY</div><p style="font-family: KaiTi, 楷体, KaiTi_GB2312, STKaiti, serif; font-size:13px;line-height:1.9;color:var(--text);margin:0;">{_esc_html(str(summary.get("strategy_brief", "")))}</p></div>',
             unsafe_allow_html=True,
         )
     with c5:
         st.markdown(
-            f'<div class="card"><div class="card-title">TACTICS</div><p style="font-size:13px;line-height:1.9;color:var(--text);margin:0;">{_esc_html(str(summary.get("execution", "")))}</p></div>',
+            f'<div class="card"><div class="card-title">TACTICS</div><p style="font-family: KaiTi, 楷体, KaiTi_GB2312, STKaiti, serif; font-size:13px;line-height:1.9;color:var(--text);margin:0;">{_esc_html(str(summary.get("execution", "")))}</p></div>',
             unsafe_allow_html=True,
         )
 
@@ -930,6 +1007,24 @@ def render_summary_cards(summary: Dict[str, Any]) -> None:
 def render_result_page(sb: Optional[Any]) -> None:
     snap = st.session_state.get("input_snapshot") or {}
     title = snap.get("brand_name") or snap.get("category") or "分析报告"
+
+    # 结果页：强制报告区域楷体（不影响表单页/首页）
+    st.markdown(
+        """
+<style>
+  /* Only affects current page render; Streamlit re-renders per page */
+  .kai-scope, .kai-scope * {
+    font-family: KaiTi, 楷体, KaiTi_GB2312, STKaiti, serif !important;
+  }
+  /* Markdown containers on result page */
+  .kai-scope div[data-testid="stMarkdownContainer"] * {
+    font-family: KaiTi, 楷体, KaiTi_GB2312, STKaiti, serif !important;
+  }
+</style>
+<div class="kai-scope"></div>
+""",
+        unsafe_allow_html=True,
+    )
 
     top_l, top_r = st.columns(2, gap="medium")
     with top_l:
@@ -945,6 +1040,23 @@ def render_result_page(sb: Optional[Any]) -> None:
     st.markdown('<div class="herti-title" style="font-size:30px;letter-spacing:.12em;">你的冷启动增长方案</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="herti-meta">{_esc_html(str(title))}</div>', unsafe_allow_html=True)
     summary = st.session_state.report_data or {}
+
+    # 分维度打分（优先用模型返回；缺失则自动补齐）
+    if isinstance(summary, dict):
+        dims = _normalize_dimension_scores(summary)
+        total80 = clamp_int_score(summary.get("score"))
+        st.markdown(
+            "<div class='card'><div class='card-title'>评分总览</div></div>",
+            unsafe_allow_html=True,
+        )
+        lines = [f"- 总分：{total80}/80（四维度之和）"]
+        for k in ["市场定位匹配度", "卖点竞争力", "价格带合理性", "冷启动可操作性"]:
+            it = dims.get(k) or {}
+            sc = it.get("score", "")
+            cm = it.get("comment", "")
+            lines.append(f"- {k}：{sc}/20｜{cm}")
+        st.markdown("\n".join(lines))
+
     render_summary_cards(summary if isinstance(summary, dict) else {})
 
     # 价格带建议：不改模型逻辑，只做 UI 展示
