@@ -579,12 +579,37 @@ def _markdown_to_safe_html(md: str) -> str:
     return html
 
 
+def _auto_deduct_hint(dim_name: str, score: int) -> str:
+    """
+    当模型未给出“扣分点：…”，用维度 + 分数给一个轻量、可信的扣分点。
+    目标：不出现“信息不足/待补强”这种模板话术，同时不凭空编造细节。
+    """
+    s = max(0, min(25, int(score)))
+    high = s >= 23
+    mid = 18 <= s <= 22
+    if dim_name == "市场定位匹配度":
+        return "定位已对但人群/场景颗粒度可更细" if high else ("用户画像与细分场景仍偏泛" if mid else "定位与目标人群边界不清")
+    if dim_name == "卖点竞争力":
+        return "卖点成立但差异化表达可更锐利" if high else ("卖点同质化风险，需更强证据点" if mid else "核心卖点不够独特/可传播")
+    if dim_name == "价格带合理性":
+        return "价格带可行但需强化价值锚点" if high else ("客单与预期不匹配，转化阻力偏高" if mid else "价格带与人群支付意愿错位")
+    if dim_name == "冷启动可操作性":
+        return "动作清晰但需进一步拆到周节奏" if high else ("执行链路不够闭环，素材/频次需细化" if mid else "路径不清晰，落地成本偏高")
+    return "关键约束未拆清（人群/场景/渠道）"
+
+
 def _format_dimension_line(dim_name: str, score: Any, comment: str) -> str:
     """
     • 维度：x/25 | 扣分点：…；优化：…
     若 comment 不足以拆分，则用“优化：…”承接整句。
     """
     cm = str(comment or "").strip()
+    # 防止模型/旧版本兜底话术直接展示
+    cm = cm.replace("信息不足/待补强", "").replace("信息不足", "").replace("待补强", "").strip("；。 ,，")
+    try:
+        sc_i = max(0, min(25, int(round(float(score)))))
+    except Exception:
+        sc_i = 0
     deduct = ""
     improve = ""
     m = re.search(r"(扣分点|扣分)[:：](.+?)(；|;|。|$)", cm)
@@ -599,10 +624,10 @@ def _format_dimension_line(dim_name: str, score: Any, comment: str) -> str:
     else:
         improve = cm
     if not deduct:
-        deduct = "信息不足/待补强"
+        deduct = _auto_deduct_hint(dim_name, sc_i)
     if not improve:
         improve = "结合预算与人群细化动作清单"
-    return f"• {dim_name}：{score}/25 | 扣分点：{deduct}；优化：{improve}"
+    return f"• {dim_name}：{sc_i}/25 | 扣分点：{deduct}；优化：{improve}"
 
 
 def _make_share_long_image_component_html(title: str, body_html: str) -> str:
