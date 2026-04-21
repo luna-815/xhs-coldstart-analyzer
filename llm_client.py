@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Iterator, Optional
 
 import requests
 
@@ -122,5 +122,98 @@ def call_llm_backend(
         if not raw:
             raise LlmUserError("生成失败，请重新尝试")
         return raw
+
+    raise LlmUserError(last_msg)
+
+
+def call_llm_backend_stream(
+    base_url: str,
+    internal_token: str,
+    system_text: str,
+    user_text: str,
+    *,
+    model: Optional[str] = None,
+    on_retry: Optional[Callable[[str], None]] = None,
+) -> Iterator[str]:
+    """
+    调用后端 /api/v1/generate_stream（SSE）。逐段 yield 文本增量（拼接即为完整输出）。
+    """
+    root = _normalize_base(base_url)
+    if not root:
+        raise LlmUserError("API配置异常，请联系管理员")
+
+    endpoint = f"{root}/api/v1/generate_stream"
+    headers: Dict[str, str] = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+    if internal_token:
+        headers["X-Internal-Token"] = internal_token
+
+    body: Dict[str, Any] = {"system_text": system_text, "user_text": user_text}
+    if model:
+        body["model"] = model
+
+    last_msg = "网络异常，请检查网络后重试"
+    for attempt in range(3):
+        try:
+            with requests.post(
+                endpoint,
+                headers=headers,
+                data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                stream=True,
+                timeout=(15, 600),
+            ) as r:
+                if r.status_code == 401:
+                    raise LlmUserError("API配置异常，请联系管理员", error_code="unauthorized")
+                if r.status_code >= 400:
+                    txt = (r.text or "")[:1200]
+                    raise LlmUserError("生成失败，请重新尝试", error_code="http", debug=txt)
+
+                current_event = ""
+                for raw_line in r.iter_lines(decode_unicode=True):
+                    if raw_line is None:
+                        continue
+                    line = str(raw_line).strip("\r")
+                    if line.startswith("event:"):
+                        current_event = line[len("event:") :].strip()
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[len("data:") :].strip()
+                    if not payload:
+                        continue
+                    try:
+                        obj = json.loads(payload)
+                    except Exception:
+                        continue
+                    if current_event == "error" or (isinstance(obj, dict) and obj.get("ok") is False):
+                        em = str((obj or {}).get("error_message") or "").strip()
+                        code = str((obj or {}).get("error_code") or "")
+                        dbg = str((obj or {}).get("debug") or "")
+                        raise LlmUserError(em or "生成失败，请重新尝试", error_code=code, debug=dbg)
+                    if isinstance(obj, dict) and obj.get("ok") is True:
+                        d = str(obj.get("delta") or "")
+                        if d:
+                            yield d
+                    if current_event == "done":
+                        return
+                    current_event = ""
+                return
+        except LlmUserError:
+            raise
+        except requests.Timeout:
+            if attempt < 2:
+                if on_retry:
+                    try:
+                        on_retry("请求超时，正在重试...")
+                    except Exception:
+                        pass
+                time.sleep(2**attempt)
+                continue
+            raise LlmUserError("网络异常，请检查网络后重试") from None
+        except requests.RequestException:
+            last_msg = "网络异常，请检查网络后重试"
+            if attempt < 2:
+                time.sleep(2**attempt)
+                continue
+            raise LlmUserError(last_msg) from None
 
     raise LlmUserError(last_msg)

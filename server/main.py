@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -134,6 +135,31 @@ def _invoke_once(client: Any, model: str, system_text: str, user_text: str) -> s
     return str(content).strip()
 
 
+def _invoke_stream(client: Any, model: str, system_text: str, user_text: str):
+    """Yield text deltas from Ark streaming completion."""
+    stream = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_text},
+            {"role": "user", "content": user_text},
+        ],
+        max_tokens=3200,
+        temperature=0.2,
+        stream=True,
+    )
+    for chunk in stream:
+        try:
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            delta = getattr(choices[0], "delta", None)
+            piece = getattr(delta, "content", None) if delta is not None else None
+            if piece:
+                yield str(piece)
+        except Exception:
+            continue
+
+
 def _should_retry(exc: Exception) -> bool:
     try:
         from volcenginesdkarkruntime._exceptions import (
@@ -235,6 +261,55 @@ def generate(body: GenerateRequest, request: Request) -> GenerateResponse:
         if debug_enabled or code == "unknown":
             dbg = json.dumps({"type": type(e).__name__, "message": str(e)}, ensure_ascii=False)
         return GenerateResponse(ok=False, error_message=user_msg, error_code=code, request_id=rid, debug=dbg)
+
+
+@app.post("/api/v1/generate_stream")
+def generate_stream(body: GenerateRequest, request: Request):
+    """
+    SSE：event:data\n\n，每条 data 为 UTF-8 文本增量。
+    结束时发送 event:done。
+    """
+    rid = str(uuid.uuid4())
+    logging.info("generate_stream start rid=%s from=%s", rid, getattr(request.client, "host", ""))
+
+    token = os.getenv("INTERNAL_API_TOKEN", "").strip()
+    if token:
+        if request.headers.get("X-Internal-Token", "") != token:
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+    api_key = os.getenv("ARK_API_KEY", "").strip()
+    if not api_key:
+
+        def err_gen():
+            yield "event: error\n"
+            yield 'data: {"ok":false,"error_message":"API配置异常，请联系管理员","error_code":"missing_credentials"}\n\n'
+
+        return StreamingResponse(err_gen(), media_type="text/event-stream")
+
+    model = (body.model or os.getenv("ARK_MODEL_ID", "doubao-seed-2-0-pro-260215")).strip()
+
+    def sse_gen():
+        try:
+            client = _get_ark_client()
+            for piece in _invoke_stream(client, model, body.system_text, body.user_text):
+                # SSE data 允许多行；此处单行 JSON 包裹以避免注入换行破坏协议
+                payload = json.dumps({"ok": True, "delta": piece}, ensure_ascii=False)
+                yield f"data: {payload}\n\n"
+            yield "event: done\n"
+            yield "data: {}\n\n"
+        except Exception as e:
+            user_msg, code = _map_exception(e)
+            dbg = ""
+            debug_enabled = os.getenv("DEBUG_API", "").strip() in ("1", "true", "True", "yes", "YES")
+            if debug_enabled or code == "unknown":
+                dbg = json.dumps({"type": type(e).__name__, "message": str(e)}, ensure_ascii=False)
+            payload = json.dumps(
+                {"ok": False, "error_message": user_msg, "error_code": code, "debug": dbg}, ensure_ascii=False
+            )
+            yield "event: error\n"
+            yield f"data: {payload}\n\n"
+
+    return StreamingResponse(sse_gen(), media_type="text/event-stream")
 
 
 if __name__ == "__main__":
